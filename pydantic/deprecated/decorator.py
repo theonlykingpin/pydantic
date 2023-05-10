@@ -4,9 +4,10 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, 
 
 from typing_extensions import deprecated
 
-from .._internal import _config, _typing_extra, _utils
-from ..decorators import field_validator
+from .._internal import _config, _typing_extra
+from ..alias_generators import to_pascal
 from ..errors import PydanticUserError
+from ..functional_validators import field_validator
 from ..main import BaseModel, create_model
 
 __all__ = ('validate_arguments',)
@@ -267,4 +268,4 @@ class ValidatedFunction:
 
             model_config = config_wrapper.config_dict
 
-        self.model = create_model(_utils.to_camel(self.raw_function.__name__), __base__=DecoratorBaseModel, **fields)
+        self.model = create_model(to_pascal(self.raw_function.__name__), __base__=DecoratorBaseModel, **fields)

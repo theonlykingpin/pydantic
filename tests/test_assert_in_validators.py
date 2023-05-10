@@ -3,8 +3,7 @@ PYTEST_DONT_REWRITE
 """
 import pytest
 
-from pydantic import BaseModel, ValidationError
-from pydantic.decorators import field_validator
+from pydantic import BaseModel, ValidationError, field_validator
 
 
 def test_assert_raises_validation_error():
@@ -31,6 +30,6 @@ def test_assert_raises_validation_error():
             'ctx': {'error': 'invalid a'},
         }
     ]
-    actual_errors = exc_info.value.errors()
+    actual_errors = exc_info.value.errors(include_url=False)
     if expected_errors != actual_errors:
         pytest.fail(f'Actual errors: {actual_errors}\nExpected errors: {expected_errors}')

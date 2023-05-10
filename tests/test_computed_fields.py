@@ -8,7 +8,15 @@ from typing import Any, ClassVar
 import pytest
 from pydantic_core import PydanticSerializationError, ValidationError
 
-from pydantic import AnalyzedType, BaseModel, Field, PrivateAttr, computed_field, dataclasses, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    PrivateAttr,
+    TypeAdapter,
+    computed_field,
+    dataclasses,
+    field_validator,
+)
 
 try:
     from functools import cached_property, lru_cache, singledispatchmethod
@@ -339,7 +347,7 @@ def test_dataclass():
 
     m = MyDataClass(x=2)
     assert m.double == 4
-    assert AnalyzedType(MyDataClass).dump_python(m) == {'x': 2, 'double': 4}
+    assert TypeAdapter(MyDataClass).dump_python(m) == {'x': 2, 'double': 4}
 
 
 def test_free_function():
@@ -408,8 +416,11 @@ def test_frozen():
     assert m.area == 16.0
     assert m.model_dump() == {'side': 4.0, 'area': 16.0}
 
-    with pytest.raises(TypeError, match='"Square" is frozen and does not support item assignment'):
+    with pytest.raises(ValidationError) as exc_info:
         m.area = 4
+    assert exc_info.value.errors(include_url=False) == [
+        {'type': 'frozen_instance', 'loc': ('area',), 'msg': 'Instance is frozen', 'input': 4}
+    ]
 
 
 def test_validate_assignment():

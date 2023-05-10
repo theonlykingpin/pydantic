@@ -37,8 +37,8 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     constr,
+    field_validator,
 )
-from pydantic.decorators import field_validator
 
 
 def test_success():
@@ -64,7 +64,9 @@ def ultra_simple_model_fixture():
 def test_ultra_simple_missing(UltraSimpleModel):
     with pytest.raises(ValidationError) as exc_info:
         UltraSimpleModel()
-    assert exc_info.value.errors() == [{'loc': ('a',), 'msg': 'Field required', 'type': 'missing', 'input': {}}]
+    assert exc_info.value.errors(include_url=False) == [
+        {'loc': ('a',), 'msg': 'Field required', 'type': 'missing', 'input': {}}
+    ]
     assert str(exc_info.value) == (
         '1 validation error for UltraSimpleModel\n'
         'a\n'
@@ -75,7 +77,7 @@ def test_ultra_simple_missing(UltraSimpleModel):
 def test_ultra_simple_failed(UltraSimpleModel):
     with pytest.raises(ValidationError) as exc_info:
         UltraSimpleModel(a='x', b='x')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'float_parsing',
             'loc': ('a',),
@@ -155,7 +157,7 @@ def test_nullable_strings_fails(NoneCheckModel):
             required_bytes_value=None,
             required_bytes_none_value=None,
         )
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'string_type',
             'loc': ('required_str_value',),
@@ -205,7 +207,7 @@ def test_not_required():
     assert Model().a is None
     with pytest.raises(ValidationError) as exc_info:
         Model(a=None)
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'float_type',
             'loc': ('a',),
@@ -218,9 +220,14 @@ def test_not_required():
 def test_allow_extra():
     class Model(BaseModel):
         model_config = ConfigDict(extra='allow')
-        a: float = ...
+        a: float
 
-    assert Model(a='10.2', b=12).b == 12
+    m = Model(a='10.2', b=12)
+    assert m.__dict__ == {'a': 10.2}
+    assert m.__pydantic_extra__ == {'b': 12}
+    assert m.a == 10.2
+    assert m.b == 12
+    assert m.model_extra == {'b': 12}
 
 
 @pytest.mark.parametrize('extra', ['ignore', 'forbid', 'allow'])
@@ -263,7 +270,7 @@ def test_forbidden_extra_fails():
 
     with pytest.raises(ValidationError) as exc_info:
         ForbiddenExtra(foo='ok', bar='wrong', spam='xx')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'extra_forbidden',
             'loc': ('bar',),
@@ -321,8 +328,10 @@ def test_extra_ignored():
     model = Model(a=0.2, b=0.1)
     assert not hasattr(model, 'b')
 
-    with pytest.raises(ValueError, match='"Model" object has no field "c"'):
-        model.c = 1
+    with pytest.raises(ValueError, match='"Model" object has no field "b"'):
+        model.b = 1
+
+    assert model.model_extra is None
 
 
 def test_field_order_is_preserved_with_extra():
@@ -407,7 +416,9 @@ def test_required():
 
     with pytest.raises(ValidationError) as exc_info:
         Model()
-    assert exc_info.value.errors() == [{'type': 'missing', 'loc': ('a',), 'msg': 'Field required', 'input': {}}]
+    assert exc_info.value.errors(include_url=False) == [
+        {'type': 'missing', 'loc': ('a',), 'msg': 'Field required', 'input': {}}
+    ]
 
 
 def test_mutability():
@@ -432,9 +443,11 @@ def test_frozen_model():
     m = FrozenModel()
 
     assert m.a == 10
-    with pytest.raises(TypeError) as exc_info:
+    with pytest.raises(ValidationError) as exc_info:
         m.a = 11
-    assert '"FrozenModel" is frozen and does not support item assignment' in exc_info.value.args[0]
+    assert exc_info.value.errors(include_url=False) == [
+        {'type': 'frozen_instance', 'loc': ('a',), 'msg': 'Instance is frozen', 'input': 11}
+    ]
 
 
 def test_not_frozen_are_not_hashable():
@@ -536,7 +549,7 @@ def test_validating_assignment_fail(ValidateAssignmentModel):
 
     with pytest.raises(ValidationError) as exc_info:
         p.a = 'b'
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'int_parsing',
             'loc': ('a',),
@@ -547,7 +560,7 @@ def test_validating_assignment_fail(ValidateAssignmentModel):
 
     with pytest.raises(ValidationError) as exc_info:
         p.b = ''
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'string_too_short',
             'loc': ('b',),
@@ -587,8 +600,8 @@ def test_literal_enum_values():
     with pytest.raises(ValidationError) as exc_info:
         Model(baz=FooEnum.bar)
 
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'literal_error',
             'loc': ('baz',),
@@ -657,8 +670,8 @@ def test_arbitrary_type_allowed_validation_fails():
     input_value = OtherClass()
     with pytest.raises(ValidationError) as exc_info:
         ArbitraryTypeAllowedModel(t=input_value)
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'is_instance_of',
             'loc': ('t',),
@@ -703,8 +716,8 @@ def test_type_type_subclass_validation_success(TypeTypeModel):
 def test_type_type_validation_fails(TypeTypeModel, input_value):
     with pytest.raises(ValidationError) as exc_info:
         TypeTypeModel(t=input_value)
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'is_subclass_of',
             'loc': ('t',),
@@ -733,8 +746,8 @@ def test_bare_type_type_validation_fails(bare_type):
     arbitrary_type = ArbitraryType()
     with pytest.raises(ValidationError) as exc_info:
         TypeTypeModel(t=arbitrary_type)
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'is_type',
             'loc': ('t',),
@@ -1144,36 +1157,9 @@ def test_revalidate_instances_always():
     assert not hasattr(t.user, 'sins')
 
 
-@pytest.mark.skip(reason='not implemented')
-@pytest.mark.parametrize('comv_value', [True, False])
-def test_copy_on_model_validation_warning(comv_value):
-    class User(BaseModel):
-        # True interpreted as 'shallow', False interpreted as 'none'
-        model_config = ConfigDict(copy_on_model_validation=comv_value)
-
-        hobbies: List[str]
-
-    my_user = User(hobbies=['scuba diving'])
-
-    class Transaction(BaseModel):
-        user: User
-
-    with pytest.warns(DeprecationWarning, match="`copy_on_model_validation` should be a string: 'deep', 'shallow' or"):
-        t = Transaction(user=my_user)
-
-    if comv_value:
-        assert t.user is not my_user
-    else:
-        assert t.user is my_user
-    assert t.user.hobbies is my_user.hobbies
-
-
-@pytest.mark.skip(reason='not implemented')
-def test_validation_deep_copy():
-    """By default, Config.copy_on_model_validation should do a deep copy"""
-
+def test_revalidate_instances_always_list_of_model_instance():
     class A(BaseModel):
-        model_config = ConfigDict(copy_on_model_validation='deep')
+        model_config = ConfigDict(revalidate_instances='always')
         name: str
 
     class B(BaseModel):
@@ -1406,7 +1392,7 @@ def test_recursive_cycle_with_repeated_field():
     assert A.model_validate({'b': {'a1': {'b': {'a1': None}}}}) == A(b=B(a1=A(b=B(a1=None))))
     with pytest.raises(ValidationError) as exc_info:
         A.model_validate({'b': {'a1': {'a1': None}}})
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {'input': {'a1': None}, 'loc': ('b', 'a1', 'b'), 'msg': 'Field required', 'type': 'missing'}
     ]
 
@@ -1506,8 +1492,8 @@ def test_default_factory_validate_children():
     with pytest.raises(ValidationError) as exc_info:
         Parent(children=[{'x': 1}, {'y': 2}])
 
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {'type': 'missing', 'loc': ('children', 1, 'x'), 'msg': 'Field required', 'input': {'y': 2}}
     ]
 
@@ -1563,7 +1549,9 @@ def test_frozen_field():
     assert r.id == 1
     with pytest.raises(ValidationError) as exc_info:
         r.id = 2
-    assert exc_info.value.errors() == [{'input': 2, 'loc': ('id',), 'msg': 'Field is frozen', 'type': 'frozen_field'}]
+    assert exc_info.value.errors(include_url=False) == [
+        {'input': 2, 'loc': ('id',), 'msg': 'Field is frozen', 'type': 'frozen_field'}
+    ]
 
 
 def test_repr_field():
@@ -1705,8 +1693,8 @@ def test_typing_counter_value_validation():
     with pytest.raises(ValidationError) as exc_info:
         Model(x={'a': 'a'})
 
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'int_parsing',
             'loc': ('x', 'a'),
@@ -1817,7 +1805,9 @@ def test_final_field_reassignment():
 
     with pytest.raises(ValidationError) as exc_info:
         obj.a = 20
-    assert exc_info.value.errors() == [{'input': 20, 'loc': ('a',), 'msg': 'Field is frozen', 'type': 'frozen_field'}]
+    assert exc_info.value.errors(include_url=False) == [
+        {'input': 20, 'loc': ('a',), 'msg': 'Field is frozen', 'type': 'frozen_field'}
+    ]
 
 
 def test_field_by_default_is_not_final():
@@ -2099,7 +2089,7 @@ def test_model_validate_strict() -> None:
     assert LaxModel.model_validate({'x': '1'}, strict=False) == LaxModel(x=1)
     with pytest.raises(ValidationError) as exc_info:
         LaxModel.model_validate({'x': '1'}, strict=True)
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'model_class_type',
             'loc': (),
@@ -2111,13 +2101,13 @@ def test_model_validate_strict() -> None:
 
     with pytest.raises(ValidationError) as exc_info:
         StrictModel.model_validate({'x': '1'})
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {'type': 'int_type', 'loc': ('x',), 'msg': 'Input should be a valid integer', 'input': '1'}
     ]
     assert StrictModel.model_validate({'x': '1'}, strict=False) == StrictModel(x=1)
     with pytest.raises(ValidationError) as exc_info:
         LaxModel.model_validate({'x': '1'}, strict=True)
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'model_class_type',
             'loc': (),
@@ -2143,19 +2133,19 @@ def test_model_validate_json_strict() -> None:
     assert LaxModel.model_validate_json(json.dumps({'x': '1'}), strict=False) == LaxModel(x=1)
     with pytest.raises(ValidationError) as exc_info:
         LaxModel.model_validate_json(json.dumps({'x': '1'}), strict=True)
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {'type': 'int_type', 'loc': ('x',), 'msg': 'Input should be a valid integer', 'input': '1'}
     ]
 
     with pytest.raises(ValidationError) as exc_info:
         StrictModel.model_validate_json(json.dumps({'x': '1'}), strict=None)
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {'type': 'int_type', 'loc': ('x',), 'msg': 'Input should be a valid integer', 'input': '1'}
     ]
     assert StrictModel.model_validate_json(json.dumps({'x': '1'}), strict=False) == StrictModel(x=1)
     with pytest.raises(ValidationError) as exc_info:
         StrictModel.model_validate_json(json.dumps({'x': '1'}), strict=True)
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {'type': 'int_type', 'loc': ('x',), 'msg': 'Input should be a valid integer', 'input': '1'}
     ]
 
@@ -2230,3 +2220,14 @@ def test_model_validate_with_context():
     assert OuterModel.model_validate({'inner': {'x': 2}}, context={'multiplier': 1}).inner.x == 2
     assert OuterModel.model_validate({'inner': {'x': 2}}, context={'multiplier': 2}).inner.x == 4
     assert OuterModel.model_validate({'inner': {'x': 2}}, context={'multiplier': 3}).inner.x == 6
+
+
+def test_equality_delegation():
+    from unittest.mock import ANY
+
+    from pydantic import BaseModel
+
+    class MyModel(BaseModel):
+        foo: str
+
+    assert MyModel(foo='bar') == ANY

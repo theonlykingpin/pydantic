@@ -3,22 +3,24 @@ Types and utility functions used by various other internal tools.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict
 
 from pydantic_core import core_schema
 
-if TYPE_CHECKING:
-    from pydantic.json_schema import GenerateJsonSchema
+from pydantic._internal._core_utils import CoreSchemaOrField
 
+if TYPE_CHECKING:
+    from pydantic.json_schema import GenerateJsonSchema, JsonSchemaMode
 
 JsonSchemaValue = Dict[str, Any]
-CoreSchemaOrField = Union[core_schema.CoreSchema, core_schema.DataclassField, core_schema.TypedDictField]
 
 
 class GetJsonSchemaHandler:
     """
     Handler to call into the next JSON schema generation function
     """
+
+    mode: JsonSchemaMode
 
     def __call__(self, __core_schema: CoreSchemaOrField) -> JsonSchemaValue:
         """Call the inner handler and get the JsonSchemaValue it returns.
@@ -72,6 +74,7 @@ class UnpackedRefJsonSchemaHandler(GetJsonSchemaHandler):
 
     def __init__(self, handler: GetJsonSchemaHandler) -> None:
         self.handler = handler
+        self.mode = handler.mode
 
     def resolve_ref_schema(self, __maybe_ref_json_schema: JsonSchemaValue) -> JsonSchemaValue:
         return self.handler.resolve_ref_schema(__maybe_ref_json_schema)
@@ -122,6 +125,7 @@ class GenerateJsonSchemaHandler(GetJsonSchemaHandler):
     def __init__(self, generate_json_schema: GenerateJsonSchema, handler_override: HandlerOverride | None) -> None:
         self.generate_json_schema = generate_json_schema
         self.handler = handler_override or generate_json_schema.generate_inner
+        self.mode = generate_json_schema.mode
 
     def __call__(self, __core_schema: CoreSchemaOrField) -> JsonSchemaValue:
         return self.handler(__core_schema)

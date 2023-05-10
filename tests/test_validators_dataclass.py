@@ -4,9 +4,8 @@ from typing import Any, List
 import pytest
 from dirty_equals import HasRepr
 
-from pydantic import ValidationError, root_validator
+from pydantic import ValidationError, field_validator, model_validator
 from pydantic.dataclasses import dataclass
-from pydantic.decorators import field_validator
 
 
 def test_simple():
@@ -59,7 +58,7 @@ def test_validate_multiple():
 
     with pytest.raises(ValidationError) as exc_info:
         MyDataclass(a='x', b='x')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'ctx': {'error': 'a is too short'},
             'input': 'x',
@@ -150,7 +149,7 @@ def test_inheritance_replace():
     assert Child(a=0).a == 5
 
 
-def test_root_validator():
+def test_model_validator():
     root_val_values = []
 
     @dataclass
@@ -163,12 +162,13 @@ def test_root_validator():
         def repeat_b(cls, v):
             return v * 2
 
-        @root_validator(skip_on_failure=True)
-        def root_validator(cls, values):
-            root_val_values.append(values)
-            if 'snap' in values.get('b', ''):
+        @model_validator(mode='after')
+        def root_validator(cls, m):
+            root_val_values.append(asdict(m))
+            if 'snap' in m.b:
                 raise ValueError('foobar')
-            return dict(values, b='changed')
+            m.b = 'changed'
+            return m
 
     assert asdict(MyDataclass(a='123', b='bar')) == {'a': 123, 'b': 'changed'}
 
@@ -176,7 +176,7 @@ def test_root_validator():
         MyDataclass(1, b='snap dragon')
     assert root_val_values == [{'a': 123, 'b': 'barbar'}, {'a': 1, 'b': 'snap dragonsnap dragon'}]
 
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'ctx': {'error': 'foobar'},
             'input': HasRepr("ArgsKwargs((1,), {'b': 'snap dragon'})"),

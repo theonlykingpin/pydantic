@@ -1,3 +1,4 @@
+import contextlib
 import re
 import sys
 from collections import deque
@@ -5,7 +6,7 @@ from datetime import date, datetime
 from enum import Enum
 from functools import partial, partialmethod
 from itertools import product
-from typing import Any, Callable, Deque, Dict, FrozenSet, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Deque, Dict, FrozenSet, List, Optional, Tuple, Union
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,10 +21,14 @@ from pydantic import (
     ValidationInfo,
     ValidatorFunctionWrapHandler,
     errors,
+    field_validator,
+    model_validator,
+    root_validator,
     validator,
 )
-from pydantic.annotated_arguments import AfterValidator, BeforeValidator, PlainValidator, WrapValidator
-from pydantic.decorators import field_validator, root_validator
+from pydantic.functional_validators import AfterValidator, BeforeValidator, PlainValidator, WrapValidator
+
+V1_VALIDATOR_DEPRECATION_MATCH = r'Pydantic V1 style `@validator` validators are deprecated'
 
 
 def test_annotated_validator_after() -> None:
@@ -81,7 +86,7 @@ def test_annotated_validator_wrap() -> None:
 
     with pytest.raises(ValidationError) as exc_info:
         Model(x=date(year=1970, month=4, day=17))
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'value_error',
             'loc': ('x',),
@@ -108,7 +113,7 @@ def test_annotated_validator_nested() -> None:
     with pytest.raises(ValidationError) as exc_info:
         Model(x=[0, -1, -2])
 
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'assertion_error',
             'loc': ('x',),
@@ -168,7 +173,7 @@ def test_simple():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='snap')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'value_error',
             'loc': ('a',),
@@ -185,7 +190,7 @@ def test_int_validation():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='snap')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'int_parsing',
             'loc': ('a',),
@@ -198,7 +203,7 @@ def test_int_validation():
     assert Model(a=False).a == 0
     with pytest.raises(ValidationError) as exc_info:
         Model(a=4.5)
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'int_from_float',
             'loc': ('a',),
@@ -218,7 +223,7 @@ def test_int_overflow_validation(value):
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a=value)
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {'type': 'finite_number', 'loc': ('a',), 'msg': 'Input should be a finite number', 'input': value}
     ]
 
@@ -229,7 +234,7 @@ def test_frozenset_validation():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='snap')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {'type': 'frozen_set_type', 'loc': ('a',), 'msg': 'Input should be a valid frozenset', 'input': 'snap'}
     ]
     assert Model(a={1, 2, 3}).a == frozenset({1, 2, 3})
@@ -245,12 +250,12 @@ def test_deque_validation():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='snap')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {'type': 'list_type', 'loc': ('a',), 'msg': 'Input should be a valid list', 'input': 'snap'}
     ]
     with pytest.raises(ValidationError) as exc_info:
         Model(a=['a'])
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'int_parsing',
             'loc': ('a', 0),
@@ -260,7 +265,7 @@ def test_deque_validation():
     ]
     with pytest.raises(ValidationError) as exc_info:
         Model(a=('a',))
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'int_parsing',
             'loc': ('a', 0),
@@ -270,7 +275,7 @@ def test_deque_validation():
     ]
     with pytest.raises(ValidationError) as exc_info:
         Model(a={'1'})
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {'type': 'list_type', 'loc': ('a',), 'msg': 'Input should be a valid list', 'input': {'1'}}
     ]
     assert Model(a=[4, 5]).a == deque([4, 5])
@@ -325,7 +330,7 @@ def test_validate_pre_error():
     calls = []
     with pytest.raises(ValidationError) as exc_info:
         Model(a=[1, 3])
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'value_error',
             'loc': ('a',),
@@ -339,7 +344,7 @@ def test_validate_pre_error():
     calls = []
     with pytest.raises(ValidationError) as exc_info:
         Model(a=[5, 10])
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'value_error',
             'loc': ('a',),
@@ -414,7 +419,7 @@ def test_validating_assignment_extra(ValidateAssignmentModel):
 def test_validating_assignment_dict(ValidateAssignmentModel):
     with pytest.raises(ValidationError) as exc_info:
         ValidateAssignmentModel(a='x', b='xx')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'int_parsing',
             'loc': ('a',),
@@ -465,7 +470,7 @@ def test_validate_multiple():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='x', b='x')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'assertion_error',
             'loc': ('a',),
@@ -499,7 +504,7 @@ def test_classmethod():
 
 
 def test_use_bare():
-    with pytest.raises(TypeError, match='validators should be used with fields'):
+    with pytest.raises(TypeError, match='`@validator` should be used with fields'):
 
         class Model(BaseModel):
             a: str
@@ -512,7 +517,7 @@ def test_use_bare():
 
 
 def test_use_bare_field_validator():
-    with pytest.raises(TypeError, match='field_validators should be used with fields'):
+    with pytest.raises(TypeError, match='`@field_validator` should be used with fields'):
 
         class Model(BaseModel):
             a: str
@@ -553,7 +558,7 @@ def test_validator_bad_fields_throws_configerror():
     Attempts to create a validator with fields set as a list of strings,
     rather than just multiple string args. Expects ConfigError to be raised.
     """
-    with pytest.raises(TypeError, match='validator fields should be passed as separate string args.'):
+    with pytest.raises(TypeError, match='`@validator` fields should be passed as separate string args.'):
 
         class Model(BaseModel):
             a: str
@@ -571,7 +576,7 @@ def test_field_validator_bad_fields_throws_configerror():
     Attempts to create a validator with fields set as a list of strings,
     rather than just multiple string args. Expects ConfigError to be raised.
     """
-    with pytest.raises(TypeError, match='field_validator fields should be passed as separate string args.'):
+    with pytest.raises(TypeError, match='`@field_validator` fields should be passed as separate string args.'):
 
         class Model(BaseModel):
             a: str
@@ -683,37 +688,62 @@ def test_validate_not_always():
     assert check_calls == 1
 
 
-def test_wildcard_validators():
+@pytest.mark.parametrize(
+    'decorator, pytest_warns',
+    [
+        (validator, pytest.warns(DeprecationWarning, match=V1_VALIDATOR_DEPRECATION_MATCH)),
+        (field_validator, contextlib.nullcontext()),
+    ],
+)
+def test_wildcard_validators(decorator, pytest_warns):
     calls: list[tuple[str, Any]] = []
 
-    with pytest.warns(DeprecationWarning, match=V1_VALIDATOR_DEPRECATION_MATCH):
+    with pytest_warns:
 
         class Model(BaseModel):
             a: str
             b: int
 
-            @validator('a')
+            @decorator('a')
             def check_a(cls, v: Any) -> Any:
                 calls.append(('check_a', v))
                 return v
 
-            @validator('*')
+            @decorator('*')
             def check_all(cls, v: Any) -> Any:
                 calls.append(('check_all', v))
                 return v
 
+            @decorator('*', 'a')
+            def check_all_a(cls, v: Any) -> Any:
+                calls.append(('check_all_a', v))
+                return v
+
     assert Model(a='abc', b='123').model_dump() == dict(a='abc', b=123)
-    assert calls == [('check_a', 'abc'), ('check_all', 'abc'), ('check_all', 123)]
+    assert calls == [
+        ('check_a', 'abc'),
+        ('check_all', 'abc'),
+        ('check_all_a', 'abc'),
+        ('check_all', 123),
+        ('check_all_a', 123),
+    ]
 
 
-def test_wildcard_validator_error():
-    with pytest.warns(DeprecationWarning, match=V1_VALIDATOR_DEPRECATION_MATCH):
+@pytest.mark.parametrize(
+    'decorator, pytest_warns',
+    [
+        (validator, pytest.warns(DeprecationWarning, match=V1_VALIDATOR_DEPRECATION_MATCH)),
+        (field_validator, contextlib.nullcontext()),
+    ],
+)
+def test_wildcard_validator_error(decorator, pytest_warns):
+    with pytest_warns:
 
         class Model(BaseModel):
             a: str
             b: str
 
-            @validator('*')
+            @decorator('*')
             def check_all(cls, v: Any) -> Any:
                 if 'foobar' not in v:
                     raise ValueError('"foobar" not found in a')
@@ -724,7 +754,7 @@ def test_wildcard_validator_error():
     with pytest.raises(ValidationError) as exc_info:
         Model(a='snap')
 
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'value_error',
             'loc': ('a',),
@@ -738,7 +768,7 @@ def test_wildcard_validator_error():
 
 def test_invalid_field():
     msg = (
-        r'Validators defined with incorrect fields:'
+        r'Decorators defined with incorrect fields:'
         r' tests.test_validators.test_invalid_field.<locals>.Model:\d+.check_b'
         r" \(use check_fields=False if you're inheriting from the model and intended this\)"
     )
@@ -931,39 +961,41 @@ def test_inheritance_replace_root_validator():
     it replaces the existing validator and is run instead of it.
     """
 
-    class Parent(BaseModel):
-        a: List[str]
+    with pytest.warns(DeprecationWarning):
 
-        @root_validator(skip_on_failure=True)
-        def parent_val_before(cls, values: Dict[str, Any]):
-            values['a'].append('parent before')
-            return values
+        class Parent(BaseModel):
+            a: List[str]
 
-        @root_validator(skip_on_failure=True)
-        def val(cls, values: Dict[str, Any]):
-            values['a'].append('parent')
-            return values
+            @root_validator(skip_on_failure=True)
+            def parent_val_before(cls, values: Dict[str, Any]):
+                values['a'].append('parent before')
+                return values
 
-        @root_validator(skip_on_failure=True)
-        def parent_val_after(cls, values: Dict[str, Any]):
-            values['a'].append('parent after')
-            return values
+            @root_validator(skip_on_failure=True)
+            def val(cls, values: Dict[str, Any]):
+                values['a'].append('parent')
+                return values
 
-    class Child(Parent):
-        @root_validator(skip_on_failure=True)
-        def child_val_before(cls, values: Dict[str, Any]):
-            values['a'].append('child before')
-            return values
+            @root_validator(skip_on_failure=True)
+            def parent_val_after(cls, values: Dict[str, Any]):
+                values['a'].append('parent after')
+                return values
 
-        @root_validator(skip_on_failure=True)
-        def val(cls, values: Dict[str, Any]):
-            values['a'].append('child')
-            return values
+        class Child(Parent):
+            @root_validator(skip_on_failure=True)
+            def child_val_before(cls, values: Dict[str, Any]):
+                values['a'].append('child before')
+                return values
 
-        @root_validator(skip_on_failure=True)
-        def child_val_after(cls, values: Dict[str, Any]):
-            values['a'].append('child after')
-            return values
+            @root_validator(skip_on_failure=True)
+            def val(cls, values: Dict[str, Any]):
+                values['a'].append('child')
+                return values
+
+            @root_validator(skip_on_failure=True)
+            def child_val_after(cls, values: Dict[str, Any]):
+                values['a'].append('child after')
+                return values
 
     assert Parent(a=[]).a == ['parent before', 'parent', 'parent after']
     assert Child(a=[]).a == ['parent before', 'child', 'parent after', 'child before', 'child after']
@@ -1238,7 +1270,7 @@ def test_assert_raises_validation_error():
     with pytest.raises(ValidationError) as exc_info:
         Model(a='snap')
     injected_by_pytest = "assert 'snap' == 'a'\n  - a\n  + snap"
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'assertion_error',
             'loc': ('a',),
@@ -1262,25 +1294,27 @@ def test_root_validator():
         def repeat_b(cls, v: Any):
             return v * 2
 
-        @root_validator(skip_on_failure=True)
-        def example_root_validator(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-            root_val_values.append(values)
-            if 'snap' in values.get('b', ''):
-                raise ValueError('foobar')
-            return dict(values, b='changed')
+        with pytest.warns(DeprecationWarning):
 
-        @root_validator(skip_on_failure=True)
-        def example_root_validator2(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-            root_val_values.append(values)
-            if 'snap' in values.get('c', ''):
-                raise ValueError('foobar2')
-            return dict(values, c='changed')
+            @root_validator(skip_on_failure=True)
+            def example_root_validator(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+                root_val_values.append(values)
+                if 'snap' in values.get('b', ''):
+                    raise ValueError('foobar')
+                return dict(values, b='changed')
+
+            @root_validator(skip_on_failure=True)
+            def example_root_validator2(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+                root_val_values.append(values)
+                if 'snap' in values.get('c', ''):
+                    raise ValueError('foobar2')
+                return dict(values, c='changed')
 
     assert Model(a='123', b='bar', c='baz').model_dump() == {'a': 123, 'b': 'changed', 'c': 'changed'}
 
     with pytest.raises(ValidationError) as exc_info:
         Model(b='snap dragon', c='snap dragon2')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'value_error',
             'loc': (),
@@ -1292,7 +1326,7 @@ def test_root_validator():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='broken', b='bar', c='baz')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'int_parsing',
             'loc': ('a',),
@@ -1316,23 +1350,26 @@ def test_root_validator_subclass():
     class Parent(BaseModel):
         x: int
         expected: Any
+        with pytest.warns(DeprecationWarning):
 
-        @root_validator(skip_on_failure=True)
-        @classmethod
-        def root_val(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-            assert cls is values['expected']
-            return values
+            @root_validator(skip_on_failure=True)
+            @classmethod
+            def root_val(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+                assert cls is values['expected']
+                return values
 
     class Child1(Parent):
         pass
 
     class Child2(Parent):
-        @root_validator(skip_on_failure=True)
-        @classmethod
-        def root_val(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-            assert cls is Child2
-            values['x'] = values['x'] * 2
-            return values
+        with pytest.warns(DeprecationWarning):
+
+            @root_validator(skip_on_failure=True)
+            @classmethod
+            def root_val(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+                assert cls is Child2
+                values['x'] = values['x'] * 2
+                return values
 
     class Child3(Parent):
         @classmethod
@@ -1359,12 +1396,14 @@ def test_root_validator_pre():
         def repeat_b(cls, v: Any):
             return v * 2
 
-        @root_validator(pre=True)
-        def root_validator(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-            root_val_values.append(values)
-            if 'snap' in values.get('b', ''):
-                raise ValueError('foobar')
-            return {'a': 42, 'b': 'changed'}
+        with pytest.warns(DeprecationWarning):
+
+            @root_validator(pre=True)
+            def root_validator(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+                root_val_values.append(values)
+                if 'snap' in values.get('b', ''):
+                    raise ValueError('foobar')
+                return {'a': 42, 'b': 'changed'}
 
     assert Model(a='123', b='bar').model_dump() == {'a': 42, 'b': 'changedchanged'}
 
@@ -1372,7 +1411,7 @@ def test_root_validator_pre():
         Model(b='snap dragon')
 
     assert root_val_values == [{'a': '123', 'b': 'bar'}, {'b': 'snap dragon'}]
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'value_error',
             'loc': (),
@@ -1384,38 +1423,56 @@ def test_root_validator_pre():
 
 
 def test_root_validator_types():
-    root_val_values: Optional[Tuple[Type[BaseModel], Dict[str, Any]]] = None
+    root_val_values = None
 
     class Model(BaseModel):
         a: int = 1
         b: str
 
-        @root_validator(skip_on_failure=True)
-        def root_validator(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-            nonlocal root_val_values
-            root_val_values = cls, values
-            return values
+        with pytest.warns(DeprecationWarning):
+
+            @root_validator(skip_on_failure=True)
+            def root_validator(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+                nonlocal root_val_values
+                root_val_values = cls, repr(values)
+                return values
 
         model_config = ConfigDict(extra='allow')
 
     assert Model(b='bar', c='wobble').model_dump() == {'a': 1, 'b': 'bar', 'c': 'wobble'}
 
-    assert root_val_values == (Model, {'a': 1, 'b': 'bar', 'c': 'wobble'})
+    assert root_val_values == (Model, "{'a': 1, 'b': 'bar', 'c': 'wobble'}")
 
 
 def test_root_validator_returns_none_exception():
     class Model(BaseModel):
         a: int = 1
 
-        @root_validator(skip_on_failure=True)
-        def root_validator_repeated(cls, values):
-            return None
+        with pytest.warns(DeprecationWarning):
+
+            @root_validator(skip_on_failure=True)
+            def root_validator_repeated(cls, values):
+                return None
 
     with pytest.raises(
         TypeError,
         match=r"(:?__dict__ must be set to a dictionary, not a 'NoneType')|(:?setting dictionary to a non-dict)",
     ):
         Model()
+
+
+def test_model_validator_returns_ignore():
+    # This is weird, and I don't understand entirely why it's happening, but it kind of makes sense
+
+    class Model(BaseModel):
+        a: int = 1
+
+        @model_validator(mode='after')
+        def model_validator_return_none(cls, m):
+            return None
+
+    m = Model(a=2)
+    assert m.model_dump() == {'a': 2}
 
 
 def reusable_validator(num: int) -> int:
@@ -1456,13 +1513,15 @@ def test_root_validator_classmethod(validator_classmethod, root_validator_classm
 
         if root_validator_classmethod:
             example_root_validator = classmethod(example_root_validator)
-        example_root_validator = root_validator(skip_on_failure=True)(example_root_validator)
+
+        with pytest.warns(DeprecationWarning):
+            example_root_validator = root_validator(skip_on_failure=True)(example_root_validator)
 
     assert Model(a='123', b='bar').model_dump() == {'a': 123, 'b': 'changed'}
 
     with pytest.raises(ValidationError) as exc_info:
         Model(b='snap dragon')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'value_error',
             'loc': (),
@@ -1474,7 +1533,7 @@ def test_root_validator_classmethod(validator_classmethod, root_validator_classm
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='broken', b='bar')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'int_parsing',
             'loc': ('a',),
@@ -1518,7 +1577,7 @@ def test_literal_validator():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='nope')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'literal_error',
             'loc': ('a',),
@@ -1566,7 +1625,7 @@ def test_nested_literal_validator():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='nope')
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'literal_error',
             'loc': ('a',),
@@ -1584,7 +1643,9 @@ def test_union_literal_with_constraints():
     m = Model(x=42)
     with pytest.raises(ValidationError) as exc_info:
         m.x += 1
-    assert exc_info.value.errors() == [{'input': 43, 'loc': ('x',), 'msg': 'Field is frozen', 'type': 'frozen_field'}]
+    assert exc_info.value.errors(include_url=False) == [
+        {'input': 43, 'loc': ('x',), 'msg': 'Field is frozen', 'type': 'frozen_field'}
+    ]
 
 
 def test_field_that_is_being_validated_is_excluded_from_validator_values():
@@ -1650,23 +1711,23 @@ def test_overridden_root_validators():
     class A(BaseModel):
         x: str
 
-        @root_validator(pre=True)
+        @model_validator(mode='before')
         def pre_root(cls, values: Dict[str, Any]) -> Dict[str, Any]:
             validate_stub('A', 'pre')
             return values
 
-        @root_validator(pre=False, skip_on_failure=True)
+        @model_validator(mode='after')
         def post_root(cls, values: Dict[str, Any]) -> Dict[str, Any]:
             validate_stub('A', 'post')
             return values
 
     class B(A):
-        @root_validator(pre=True)
+        @model_validator(mode='before')
         def pre_root(cls, values: Dict[str, Any]) -> Dict[str, Any]:
             validate_stub('B', 'pre')
             return values
 
-        @root_validator(pre=False, skip_on_failure=True)
+        @model_validator(mode='after')
         def post_root(cls, values: Dict[str, Any]) -> Dict[str, Any]:
             validate_stub('B', 'post')
             return values
@@ -1686,9 +1747,39 @@ def test_validating_assignment_pre_root_validator_fail():
         max_value: float
 
         model_config = ConfigDict(validate_assignment=True)
+        with pytest.warns(DeprecationWarning):
 
-        @root_validator(pre=True)
+            @root_validator(pre=True)
+            def values_are_not_string(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+                if any(isinstance(x, str) for x in values.values()):
+                    raise ValueError('values cannot be a string')
+                return values
+
+    m = Model(current=100, max_value=200)
+    with pytest.raises(ValidationError) as exc_info:
+        m.current_value = '100'
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'type': 'value_error',
+            'loc': (),
+            'msg': 'Value error, values cannot be a string',
+            'input': {'current_value': '100', 'max_value': 200.0},
+            'ctx': {'error': 'values cannot be a string'},
+        }
+    ]
+
+
+@pytest.mark.xfail(reason='Something weird going on with model_validator and assignment')
+def test_validating_assignment_model_validator_before_fail():
+    class Model(BaseModel):
+        current_value: float = Field(..., alias='current')
+        max_value: float
+
+        model_config = ConfigDict(validate_assignment=True)
+
+        @model_validator(mode='before')
         def values_are_not_string(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+            print(values)
             if any(isinstance(x, str) for x in values.values()):
                 raise ValueError('values cannot be a string')
             return values
@@ -1696,7 +1787,7 @@ def test_validating_assignment_pre_root_validator_fail():
     m = Model(current=100, max_value=200)
     with pytest.raises(ValidationError) as exc_info:
         m.current_value = '100'
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'value_error',
             'loc': (),
@@ -1717,11 +1808,12 @@ def test_validating_assignment_pre_root_validator_fail():
 )
 def test_root_validator_skip_on_failure_invalid(kwargs: Dict[str, Any]):
     with pytest.raises(TypeError, match='MUST specify `skip_on_failure=True`'):
+        with pytest.warns(DeprecationWarning, match='Pydantic V1 style `@root_validator` validators are deprecated.'):
 
-        class Model(BaseModel):
-            @root_validator(**kwargs)
-            def root_val(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-                return values
+            class Model(BaseModel):
+                @root_validator(**kwargs)
+                def root_val(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+                    return values
 
 
 @pytest.mark.parametrize(
@@ -1734,13 +1826,15 @@ def test_root_validator_skip_on_failure_invalid(kwargs: Dict[str, Any]):
     ],
 )
 def test_root_validator_skip_on_failure_valid(kwargs: Dict[str, Any]):
-    class Model(BaseModel):
-        @root_validator(**kwargs)
-        def root_val(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-            return values
+    with pytest.warns(DeprecationWarning, match='Pydantic V1 style `@root_validator` validators are deprecated.'):
+
+        class Model(BaseModel):
+            @root_validator(**kwargs)
+            def root_val(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+                return values
 
 
-def test_root_validator_many_values_change():
+def test_model_validator_many_values_change():
     """It should run root_validator on assignment and update ALL concerned fields"""
 
     class Rectangle(BaseModel):
@@ -1750,18 +1844,15 @@ def test_root_validator_many_values_change():
 
         model_config = ConfigDict(validate_assignment=True)
 
-        @root_validator(skip_on_failure=True)
-        def set_area(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-            values['area'] = values['width'] * values['height']
-            return values
+        @model_validator(mode='after')
+        def set_area(cls, m: 'Rectangle') -> 'Rectangle':
+            m.__dict__['area'] = m.width * m.height
+            return m
 
     r = Rectangle(width=1, height=1)
     assert r.area == 1
     r.height = 5
     assert r.area == 5
-
-
-V1_VALIDATOR_DEPRECATION_MATCH = r'Pydantic V1 style `@validator` validators are deprecated'
 
 
 def _get_source_line(filename: str, lineno: int) -> str:
@@ -1851,13 +1942,14 @@ def test_decorator_proxy():
 
 def test_root_validator_self():
     with pytest.raises(TypeError, match=r'`@root_validator` cannot be applied to instance methods'):
+        with pytest.warns(DeprecationWarning):
 
-        class Model(BaseModel):
-            a: int = 1
+            class Model(BaseModel):
+                a: int = 1
 
-            @root_validator(skip_on_failure=True)
-            def root_validator(self, values: Any) -> Any:
-                return values
+                @root_validator(skip_on_failure=True)
+                def root_validator(self, values: Any) -> Any:
+                    return values
 
 
 def test_validator_self():
@@ -2003,7 +2095,7 @@ def test_model_config_validate_default():
 
     with pytest.raises(ValidationError) as exc_info:
         ValidatingModel()
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'ctx': {'error': 'assert -1 > 0'},
             'input': -1,
@@ -2403,21 +2495,25 @@ def test_root_validator_allow_reuse_same_field():
 
 
 def test_root_validator_allow_reuse_inheritance():
-    class Parent(BaseModel):
-        x: int
+    with pytest.warns(DeprecationWarning):
 
-        @root_validator(skip_on_failure=True)
-        def root_val(cls, v: Dict[str, Any]) -> Dict[str, Any]:
-            v['x'] += 1
-            return v
+        class Parent(BaseModel):
+            x: int
 
-    class Child(Parent):
-        @root_validator(skip_on_failure=True)
-        def root_val(cls, v: Dict[str, Any]) -> Dict[str, Any]:
-            assert v == {'x': 1}
-            v = super().root_val(v)
-            assert v == {'x': 2}
-            return {'x': 4}
+            @root_validator(skip_on_failure=True)
+            def root_val(cls, v: Dict[str, Any]) -> Dict[str, Any]:
+                v['x'] += 1
+                return v
+
+    with pytest.warns(DeprecationWarning):
+
+        class Child(Parent):
+            @root_validator(skip_on_failure=True)
+            def root_val(cls, v: Dict[str, Any]) -> Dict[str, Any]:
+                assert v == {'x': 1}
+                v = super().root_val(v)
+                assert v == {'x': 2}
+                return {'x': 4}
 
     assert Parent(x=1).model_dump() == {'x': 2}
     assert Child(x=1).model_dump() == {'x': 4}

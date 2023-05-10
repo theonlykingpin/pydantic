@@ -9,12 +9,13 @@ from typing import Any, Dict, List, Type
 import pytest
 from typing_extensions import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PydanticUserError, ValidationError, model_serializer, root_validator
+from pydantic import BaseModel, ConfigDict, Field, PydanticUserError, ValidationError, root_validator
 from pydantic.config import Extra
 from pydantic.deprecated.decorator import validate_arguments
 from pydantic.deprecated.json import custom_pydantic_encoder, pydantic_encoder, timedelta_isoformat
 from pydantic.deprecated.parse import load_file, load_str_bytes
 from pydantic.deprecated.tools import parse_obj_as, schema_json_of, schema_of
+from pydantic.functional_serializers import model_serializer
 
 if sys.version_info < (3, 11):
     from typing_extensions import get_overloads
@@ -87,27 +88,29 @@ def test_from_attributes_root():
         en_name: str
         jp_name: str
 
-    class PokemonList(BaseModel):
-        root: List[Pokemon]
+    with pytest.warns(DeprecationWarning, match='Pydantic V1 style `@root_validator` validators are deprecated.'):
 
-        @root_validator(pre=True)
-        @classmethod
-        def populate_root(cls, values):
-            return {'root': values}
+        class PokemonList(BaseModel):
+            root: List[Pokemon]
 
-        @model_serializer(mode='wrap')
-        def _serialize(self, handler, info):
-            data = handler(self)
-            if info.mode == 'json':
-                return data['root']
-            else:
-                return data
+            @root_validator(pre=True)
+            @classmethod
+            def populate_root(cls, values):
+                return {'root': values}
 
-        @classmethod
-        def model_modify_json_schema(cls, json_schema):
-            return json_schema['properties']['root']
+            @model_serializer(mode='wrap')
+            def _serialize(self, handler, info):
+                data = handler(self)
+                if info.mode == 'json':
+                    return data['root']
+                else:
+                    return data
 
-        model_config = ConfigDict(from_attributes=True)
+            @classmethod
+            def model_modify_json_schema(cls, json_schema):
+                return json_schema['properties']['root']
+
+            model_config = ConfigDict(from_attributes=True)
 
     pika = PokemonCls(en_name='Pikachu', jp_name='ピカチュウ')
     bulbi = PokemonCls(en_name='Bulbasaur', jp_name='フシギダネ')
@@ -118,26 +121,28 @@ def test_from_attributes_root():
         Pokemon(en_name='Bulbasaur', jp_name='フシギダネ'),
     ]
 
-    class PokemonDict(BaseModel):
-        root: Dict[str, Pokemon]
-        model_config = ConfigDict(from_attributes=True)
+    with pytest.warns(DeprecationWarning, match='Pydantic V1 style `@root_validator` validators are deprecated.'):
 
-        @root_validator(pre=True)
-        @classmethod
-        def populate_root(cls, values):
-            return {'root': values}
+        class PokemonDict(BaseModel):
+            root: Dict[str, Pokemon]
+            model_config = ConfigDict(from_attributes=True)
 
-        @model_serializer(mode='wrap')
-        def _serialize(self, handler, info):
-            data = handler(self)
-            if info.mode == 'json':
-                return data['root']
-            else:
-                return data
+            @root_validator(pre=True)
+            @classmethod
+            def populate_root(cls, values):
+                return {'root': values}
 
-        @classmethod
-        def model_modify_json_schema(cls, json_schema):
-            return json_schema['properties']['root']
+            @model_serializer(mode='wrap')
+            def _serialize(self, handler, info):
+                data = handler(self)
+                if info.mode == 'json':
+                    return data['root']
+                else:
+                    return data
+
+            @classmethod
+            def model_modify_json_schema(cls, json_schema):
+                return json_schema['properties']['root']
 
     pokemons = deprecated_from_orm(PokemonDict, {'pika': pika, 'bulbi': bulbi})
     assert pokemons.root == {
@@ -371,8 +376,8 @@ def test_parse_raw_pass_fail():
         with pytest.raises(ValidationError, match='1 validation error for Model') as exc_info:
             Model.parse_raw('invalid')
 
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'value_error.jsondecode',
             'loc': ('__root__',),
@@ -415,7 +420,7 @@ def test_field_min_items_deprecation():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(x=[])
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'too_short',
             'loc': ('x',),
@@ -435,7 +440,7 @@ def test_field_min_items_with_min_length():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(x=[1])
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'too_short',
             'loc': ('x',),
@@ -455,7 +460,7 @@ def test_field_max_items():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(x=[1, 2])
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'too_long',
             'loc': ('x',),
@@ -475,7 +480,7 @@ def test_field_max_items_with_max_length():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(x=[1, 2, 3])
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'too_long',
             'loc': ('x',),
@@ -512,7 +517,9 @@ def test_allow_mutation():
     assert m.x == 1
     with pytest.raises(ValidationError) as exc_info:
         m.x = 2
-    assert exc_info.value.errors() == [{'input': 2, 'loc': ('x',), 'msg': 'Field is frozen', 'type': 'frozen_field'}]
+    assert exc_info.value.errors(include_url=False) == [
+        {'input': 2, 'loc': ('x',), 'msg': 'Field is frozen', 'type': 'frozen_field'}
+    ]
 
 
 def test_field_regex():
@@ -632,19 +639,19 @@ def test_deprecated_module(tmp_path: Path) -> None:
 
     assert hasattr(parse_obj_as, '__deprecated__')
     with pytest.warns(
-        DeprecationWarning, match='parse_obj_as is deprecated. Use pydantic.AnalyzedType.validate_python instead.'
+        DeprecationWarning, match='parse_obj_as is deprecated. Use pydantic.TypeAdapter.validate_python instead.'
     ):
         parse_obj_as(Model, {'x': 1})
 
     assert hasattr(schema_json_of, '__deprecated__')
     with pytest.warns(
-        DeprecationWarning, match='schema_json_of is deprecated. Use pydantic.AnalyzedType.json_schema instead.'
+        DeprecationWarning, match='schema_json_of is deprecated. Use pydantic.TypeAdapter.json_schema instead.'
     ):
         schema_json_of(Model)
 
     assert hasattr(schema_of, '__deprecated__')
     with pytest.warns(
-        DeprecationWarning, match='schema_of is deprecated. Use pydantic.AnalyzedType.json_schema instead.'
+        DeprecationWarning, match='schema_of is deprecated. Use pydantic.TypeAdapter.json_schema instead.'
     ):
         schema_of(Model)
 

@@ -2,8 +2,17 @@ from typing import Optional, Tuple
 
 import pytest
 
-from pydantic import BaseModel, ConfigDict, Field, PydanticUserError, ValidationError, create_model, errors
-from pydantic.decorators import field_validator, validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PydanticUserError,
+    ValidationError,
+    create_model,
+    errors,
+    field_validator,
+    validator,
+)
 from pydantic.fields import ModelPrivateAttr
 
 
@@ -92,7 +101,7 @@ def test_custom_config():
     m = model(**{'foo': '987'})
     assert m.foo == 987
     assert model.model_config == expected_config
-    with pytest.raises(TypeError):
+    with pytest.raises(ValidationError):
         m.foo = 654
 
 
@@ -173,7 +182,7 @@ def test_funky_name():
     assert m.model_dump() == {'this-is-funky': 123}
     with pytest.raises(ValidationError) as exc_info:
         model()
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {'input': {}, 'loc': ('this-is-funky',), 'msg': 'Field required', 'type': 'missing'}
     ]
 

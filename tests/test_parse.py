@@ -2,7 +2,8 @@ from typing import List, Tuple
 
 import pytest
 
-from pydantic import BaseModel, ValidationError, model_serializer, parse_obj_as, root_validator
+from pydantic import BaseModel, ValidationError, model_validator, parse_obj_as
+from pydantic.functional_serializers import model_serializer
 
 
 class Model(BaseModel):
@@ -18,7 +19,7 @@ def test_obj():
 def test_model_validate_fails():
     with pytest.raises(ValidationError) as exc_info:
         Model.model_validate([1, 2, 3])
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {'input': [1, 2, 3], 'loc': (), 'msg': 'Input should be a valid dictionary', 'type': 'dict_type'}
     ]
 
@@ -34,13 +35,15 @@ def test_model_validate_wrong_model():
 
     with pytest.raises(ValidationError) as exc_info:
         Model.model_validate(Foo())
-    assert exc_info.value.errors() == [
+    assert exc_info.value.errors(include_url=False) == [
         {'input': Foo(), 'loc': (), 'msg': 'Input should be a valid dictionary', 'type': 'dict_type'}
     ]
 
     with pytest.raises(ValidationError) as exc_info:
         Model.model_validate(Foo().model_dump())
-    assert exc_info.value.errors() == [{'input': {'c': 123}, 'loc': ('a',), 'msg': 'Field required', 'type': 'missing'}]
+    assert exc_info.value.errors(include_url=False) == [
+        {'input': {'c': 123}, 'loc': ('a',), 'msg': 'Field required', 'type': 'missing'}
+    ]
 
 
 def test_root_model_error():
@@ -60,7 +63,7 @@ def test_model_validate_root():
         # Note that the following three definitions require no changes across all __root__ models
         # I couldn't see a nice way to create a decorator that reduces the boilerplate,
         # but if we want to discourage this pattern, perhaps that's okay?
-        @root_validator(pre=True)
+        @model_validator(mode='before')
         @classmethod
         def populate_root(cls, values):
             return {'root': values}
@@ -96,7 +99,7 @@ def test_parse_root_list():
     class MyModel(BaseModel):
         root: List[str]
 
-        @root_validator(pre=True)
+        @model_validator(mode='before')
         @classmethod
         def populate_root(cls, values):
             return {'root': values}
@@ -126,7 +129,7 @@ def test_parse_nested_root_list():
     class NestedModel(BaseModel):
         root: List[NestedData]
 
-        @root_validator(pre=True)
+        @model_validator(mode='before')
         @classmethod
         def populate_root(cls, values):
             return {'root': values}
@@ -159,7 +162,7 @@ def test_parse_nested_root_tuple():
     class NestedModel(BaseModel):
         root: Tuple[int, NestedData]
 
-        @root_validator(pre=True)
+        @model_validator(mode='before')
         @classmethod
         def populate_root(cls, values):
             return {'root': values}
@@ -192,7 +195,7 @@ def test_parse_nested_custom_root():
     class NestedModel(BaseModel):
         root: List[str]
 
-        @root_validator(pre=True)
+        @model_validator(mode='before')
         @classmethod
         def populate_root(cls, values):
             return {'root': values}
@@ -212,7 +215,7 @@ def test_parse_nested_custom_root():
     class MyModel(BaseModel):
         root: NestedModel
 
-        @root_validator(pre=True)
+        @model_validator(mode='before')
         @classmethod
         def populate_root(cls, values):
             return {'root': values}
