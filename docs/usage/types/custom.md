@@ -2,19 +2,474 @@
 
 You can also define your own custom data types. There are several ways to achieve it.
 
-### Classes with `__get_validators__`
+### Composing types via `Annotated`
 
-You use a custom class with a classmethod `__get_validators__`. It will be called
-to get validators to parse and validate the input data.
+[PEP 593] introduced `Annotated` as a way to attach runtime metadata to types without changing how type checkers interpret them.
+Pydantic takes advantage of this to allow you to create types that are identical to the original type as far as type checkers are concerned, but add validation, serialize differently, etc.
+For example, to create a type representing a positive int:
 
-!!! tip
-    These validators have the same semantics as in [Validators](../validators.md), you can
-    declare a parameter `config`, `field`, etc.
+```py
+# or `from typing import Annotated` for Python 3.9+
+from typing_extensions import Annotated
 
-```py test="xfail - replace with Annoated[str, PostCodeLogic]"
-import re
+from pydantic import Field, TypeAdapter, ValidationError
+
+PositiveInt = Annotated[int, Field(gt=0)]
+
+ta = TypeAdapter(PositiveInt)
+
+print(ta.validate_python(1))
+#> 1
+
+try:
+    ta.validate_python(-1)
+except ValidationError as exc:
+    print(exc)
+    """
+    1 validation error for constrained-int
+      Input should be greater than 0 [type=greater_than, input_value=-1, input_type=int]
+    """
+```
+
+Note that you can also use constraints from [`annotated-types`] to make this Pydantic-agnostic:
+
+```py
+from annotated_types import Gt
+from typing_extensions import Annotated
+
+from pydantic import TypeAdapter, ValidationError
+
+PositiveInt = Annotated[int, Gt(0)]
+
+ta = TypeAdapter(PositiveInt)
+
+print(ta.validate_python(1))
+#> 1
+
+try:
+    ta.validate_python(-1)
+except ValidationError as exc:
+    print(exc)
+    """
+    1 validation error for constrained-int
+      Input should be greater than 0 [type=greater_than, input_value=-1, input_type=int]
+    """
+```
+
+#### Adding validation and serialization
+
+You can add or override validation, serialization, and json schemas to an arbitrary type using the markers that Pydantic exports:
+
+```py
+from typing_extensions import Annotated
+
+from pydantic import AfterValidator, PlainSerializer, TypeAdapter, WithJsonSchema
+
+
+class MyType:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+TrucatedFloat = Annotated[
+    float,
+    AfterValidator(lambda x: round(x, 1)),
+    PlainSerializer(lambda x: f'{x:.1e}', return_type=str),
+    WithJsonSchema({'type': 'string'}, mode='serialization'),
+]
+
+
+ta = TypeAdapter(TrucatedFloat)
+
+input = 1.02345
+assert input != 1.0
+
+assert ta.validate_python(input) == 1.0
+
+assert ta.dump_json(input) == b'"1.0e+00"'
+
+assert ta.json_schema(mode='validation') == {'type': 'number'}
+assert ta.json_schema(mode='serialization') == {'type': 'string'}
+```
+
+#### Generics
+
+You can use type variables within `Annotated` to make re-usable modifications to types:
+
+```python
+from typing import Any, List, Sequence, TypeVar
+
+from annotated_types import Gt, Len
+from typing_extensions import Annotated
+
+from pydantic import ValidationError
+from pydantic.type_adapter import TypeAdapter
+
+SequenceType = TypeVar('SequenceType', bound=Sequence[Any])
+
+
+ShortSequence = Annotated[SequenceType, Len(max_length=10)]
+
+
+ta = TypeAdapter(ShortSequence[List[int]])
+
+v = ta.validate_python([1, 2, 3, 4, 5])
+assert v == [1, 2, 3, 4, 5]
+
+try:
+    ta.validate_python([1] * 100)
+except ValidationError as exc:
+    print(exc)
+    """
+    1 validation error for list[int]
+      List should have at most 10 items after validation, not 11 [type=too_long, input_value=[1, 1, 1, 1, 1, 1, 1, 1, ... 1, 1, 1, 1, 1, 1, 1, 1], input_type=list]
+    """
+
+
+T = TypeVar('T')  # or a bound=SupportGt
+
+PositiveList = List[Annotated[T, Gt(0)]]
+
+ta = TypeAdapter(PositiveList[float])
+
+v = ta.validate_python([1])
+assert type(v[0]) is float
+
+
+try:
+    ta.validate_python([-1])
+except ValidationError as exc:
+    print(exc)
+    """
+    1 validation error for list[constrained-float]
+    0
+      Input should be greater than 0 [type=greater_than, input_value=-1, input_type=int]
+    """
+```
+
+### Named type aliases
+
+The above examples make use of implicit type aliases.
+This means that they will not be able to have a `title` in JSON schemas and their schema will be copied between fields.
+You can use [PEP 695]'s `TypeAliasType` via its [typing-extensions] backport to make named aliases, allowing you to define a new type without creating subclasses.
+This new type can be as simple as a name or have complex validation logic attached to it:
+
+```py
+from typing import List, TypeVar
+
+from annotated_types import Gt
+from typing_extensions import Annotated, TypeAliasType
 
 from pydantic import BaseModel
+
+T = TypeVar('T')  # or a `bound=SupportGt`
+
+ImplicitAliasPositiveIntList = List[Annotated[int, Gt(0)]]
+
+
+class Model1(BaseModel):
+    x: ImplicitAliasPositiveIntList
+    y: ImplicitAliasPositiveIntList
+
+
+print(Model1.model_json_schema())
+"""
+{
+    'properties': {
+        'x': {
+            'items': {'exclusiveMinimum': 0, 'type': 'integer'},
+            'title': 'X',
+            'type': 'array',
+        },
+        'y': {
+            'items': {'exclusiveMinimum': 0, 'type': 'integer'},
+            'title': 'Y',
+            'type': 'array',
+        },
+    },
+    'required': ['x', 'y'],
+    'title': 'Model1',
+    'type': 'object',
+}
+"""
+
+PositiveIntList = TypeAliasType('PositiveIntList', List[Annotated[int, Gt(0)]])
+
+
+class Model2(BaseModel):
+    x: PositiveIntList
+    y: PositiveIntList
+
+
+print(Model2.model_json_schema())
+"""
+{
+    '$defs': {
+        'PositiveIntList': {
+            'items': {'exclusiveMinimum': 0, 'type': 'integer'},
+            'type': 'array',
+        }
+    },
+    'properties': {
+        'x': {'$ref': '#/$defs/PositiveIntList'},
+        'y': {'$ref': '#/$defs/PositiveIntList'},
+    },
+    'required': ['x', 'y'],
+    'title': 'Model2',
+    'type': 'object',
+}
+"""
+```
+
+These named type aliases can also be generic:
+
+```py
+from typing import Generic, List, TypeVar
+
+from annotated_types import Gt
+from typing_extensions import Annotated, TypeAliasType
+
+from pydantic import BaseModel, ValidationError
+
+T = TypeVar('T')  # or a bound=SupportGt
+
+PositiveList = TypeAliasType(
+    'PositiveList', List[Annotated[T, Gt(0)]], type_params=(T,)
+)
+
+
+class Model(BaseModel, Generic[T]):
+    x: PositiveList[T]
+
+
+assert Model[int].model_validate_json('{"x": ["1"]}').x == [1]
+
+try:
+    Model[int](x=[-1])
+except ValidationError as exc:
+    print(exc)
+    """
+    1 validation error for Model[int]
+    x.0
+      Input should be greater than 0 [type=greater_than, input_value=-1, input_type=int]
+    """
+```
+
+#### Named recursive types
+
+You can also use `TypeAliasType` to create recursive types:
+
+```py
+from typing import Any, Dict, List, Union
+
+from pydantic_core import PydanticCustomError
+from typing_extensions import Annotated, TypeAliasType
+
+from pydantic import (
+    TypeAdapter,
+    ValidationError,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+    WrapValidator,
+)
+
+
+def json_custom_error_validator(
+    value: Any, handler: ValidatorFunctionWrapHandler, _info: ValidationInfo
+) -> Any:
+    """Simplify the error message to avoid a gross error stemming
+    from exhaustive checking of all union options.
+    """
+    try:
+        return handler(value)
+    except ValidationError:
+        raise PydanticCustomError(
+            'invalid_json',
+            'Input is not valid json',
+        )
+
+
+Json = TypeAliasType(
+    'Json',
+    Annotated[
+        Union[Dict[str, 'Json'], List['Json'], str, int, float, bool, None],
+        WrapValidator(json_custom_error_validator),
+    ],
+)
+
+
+ta = TypeAdapter(Json)
+
+v = ta.validate_python({'x': [1], 'y': {'z': True}})
+assert v == {'x': [1], 'y': {'z': True}}
+
+try:
+    ta.validate_python({'x': object()})
+except ValidationError as exc:
+    print(exc)
+    """
+    1 validation error for function-wrap[json_custom_error_validator()]
+      Input is not valid json [type=invalid_json, input_value={'x': <object object at 0x0123456789ab>}, input_type=dict]
+    """
+```
+
+### Handling third party types
+
+One particularly powerful thing about `Annotated` is that it lets you modify validation or serialization for 3rd party types without creating subclasses or otherwise messing with the types themselves:
+
+```py
+from typing import (
+    Any,
+    Callable,
+)
+
+from pydantic_core import core_schema
+from typing_extensions import Annotated
+
+from pydantic import (
+    BaseModel,
+    GetJsonSchemaHandler,
+    ValidationError,
+)
+from pydantic.json_schema import JsonSchemaValue
+
+
+class ThirdPartyType:
+    """
+    This is meant to represent a type from a third party library that wasn't designed with pydantic
+    integration in mind, and so doesn't have a pydantic_core.CoreSchema or anything.
+    """
+
+    x: int
+
+    def __init__(self):
+        self.x = 0
+
+
+class _ThirdPartyTypePydanticAnnotation:
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, _source_type: Any, _handler: Callable[[Any], core_schema.CoreSchema]
+    ) -> core_schema.CoreSchema:
+        """
+        We return a pydantic_core.CoreSchema that behaves in the following ways:
+        * ints will be parsed as ThirdPartyType instances with the int as the x attribute
+        * ThirdPartyType instances will be parsed as ThirdPartyType instances without any changes
+        * Nothing else will pass validation
+        * Serialization will always return just an int
+        """
+
+        def validate_from_int(value: int) -> ThirdPartyType:
+            result = ThirdPartyType()
+            result.x = value
+            return result
+
+        from_int_schema = core_schema.chain_schema(
+            [
+                core_schema.int_schema(),
+                core_schema.no_info_plain_validator_function(validate_from_int),
+            ]
+        )
+
+        return core_schema.json_or_python_schema(
+            json_schema=from_int_schema,
+            python_schema=core_schema.union_schema(
+                [
+                    # check if it's an instance first before doing any further work
+                    core_schema.is_instance_schema(ThirdPartyType),
+                    from_int_schema,
+                ]
+            ),
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda instance: instance.x
+            ),
+        )
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, _core_schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        # Use the same schema that would be used for `int`
+        return handler(core_schema.int_schema())
+
+
+# We now create an Annotated wrapper that we'll use as the annotation for fields on BaseModels etc.
+PydanticThirdPartyType = Annotated[ThirdPartyType, _ThirdPartyTypePydanticAnnotation]
+
+
+# Create a model class that uses this annotation as a field
+class Model(BaseModel):
+    third_party_type: PydanticThirdPartyType
+
+
+# Demonstrate that this field is handled correctly, that ints are parsed into ThirdPartyType, and that
+# these instances are also "dumped" directly into ints as expected.
+m_int = Model(third_party_type=1)
+assert isinstance(m_int.third_party_type, ThirdPartyType)
+assert m_int.third_party_type.x == 1
+assert m_int.model_dump() == {'third_party_type': 1}
+
+# Do the same thing where an instance of ThirdPartyType is passed in
+instance = ThirdPartyType()
+assert instance.x == 0
+instance.x = 10
+
+m_instance = Model(third_party_type=instance)
+assert isinstance(m_instance.third_party_type, ThirdPartyType)
+assert m_instance.third_party_type.x == 10
+assert m_instance.model_dump() == {'third_party_type': 10}
+
+# Demonstrate that validation errors are raised as expected for invalid inputs
+try:
+    Model(third_party_type='a')
+except ValidationError as e:
+    print(e)
+    """
+    2 validation errors for Model
+    third_party_type.is-instance[ThirdPartyType]
+      Input should be an instance of ThirdPartyType [type=is_instance_of, input_value='a', input_type=str]
+    third_party_type.chain[int,function-plain[validate_from_int()]]
+      Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='a', input_type=str]
+    """
+
+
+assert Model.model_json_schema() == {
+    'properties': {
+        'third_party_type': {'title': 'Third Party Type', 'type': 'integer'}
+    },
+    'required': ['third_party_type'],
+    'title': 'Model',
+    'type': 'object',
+}
+```
+
+You can use this approach to e.g. define behavior for Pandas or Numpy types.
+
+### Creating custom classes using `__get_pydantic_core_schema__`
+
+To do more extensive customization of how Pydantic handles custom classes, and in particular when you have access to the class or can subclass it, you can implement a special `__get_pydantic_core_schema__` to tell Pydantic how to generate the `pydantic-core` schema.
+While `pydantic` uses `pydantic-core` internally to handle validation and serialization, it is a new API for Pydantic V2, thus it is one of the areas most likely to be tweaked in the future and you should try to stick to the built in constructs like those provided by `annotated-types`, `pydantic.Field` or `BeforeValidator` and co.
+
+You can implement `__get_pydantic_core_schema__` both on a custom type and on metadata intended to be put in `Annotated`. In both cases the API is middleware-like and similar to that of `wrap` validators: you get a `source_type` (which isn't necessarily the same as the class, in particular for generics) and a `handler` that you can call with a type to either call the next metadata in `Annotated` or call into `pydantic`'s internal schema generation.
+
+The simplest no-op implementation calls the handler with the type you are given and then returns that as the result. You can also choose to modify the type before calling the handler, modify the core schema returned by the handler or not call the handler at all.
+
+Here is an example of an annotation intended to go into `Annotated` that enforces that a string is a valid postal code. The advantage of doing this via an annotation in `Annotated` instead of making a `PostalCode(str)` class is that any `str` can be passed into a model constructor and type checkers will not complain but Pydantic will still enforce validation.
+
+```py
+import re
+from typing import Any
+
+from pydantic_core import PydanticCustomError, core_schema
+from typing_extensions import Annotated
+
+from pydantic import (
+    BaseModel,
+    GetCoreSchemaHandler,
+    GetJsonSchemaHandler,
+    ValidationError,
+)
+from pydantic.json_schema import JsonSchemaValue
 
 # https://en.wikipedia.org/wiki/Postcodes_in_the_United_Kingdom#Validation
 post_code_regex = re.compile(
@@ -31,7 +486,7 @@ post_code_regex = re.compile(
 )
 
 
-class PostCode(str):
+class PostCodeAnnotation:
     """
     Partial UK postcode validation. Note: this is just an example, and is not
     intended for use in production; in particular this does NOT guarantee
@@ -39,263 +494,313 @@ class PostCode(str):
     """
 
     @classmethod
-    def __get_validators__(cls):
-        # one or more validators may be yielded which will be called in the
-        # order to validate the input, each validator will receive as an input
-        # the value returned from the previous validator
-        yield cls.validate
-
-    @classmethod
-    def __get_pydantic_json_schema__(cls, field_schema):
-        # __get_pydantic_json_schema__ should mutate the dict it receives
-        # in place, the returned value will be ignored
-        field_schema.update(
-            # simplified regex here for brevity, see the wikipedia link above
-            pattern='^[A-Z]{1,2}[0-9][A-Z0-9]? ?[0-9][A-Z]{2}$',
-            # some example postcodes
-            examples=['SP11 9DG', 'w1j7bu'],
+    def __get_pydantic_core_schema__(
+        cls, _source_type: Any, _handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        return core_schema.no_info_after_validator_function(
+            cls.validate,
+            core_schema.str_schema(),
         )
 
     @classmethod
-    def validate(cls, v):
-        if not isinstance(v, str):
-            raise TypeError('string required')
-        m = post_code_regex.fullmatch(v.upper())
-        if not m:
-            raise ValueError('invalid postcode format')
-        # you could also return a string here which would mean model.post_code
-        # would be a string, pydantic won't care but you could end up with some
-        # confusion since the value's type won't match the type annotation
-        # exactly
-        return cls(f'{m.group(1)} {m.group(2)}')
+    def __get_pydantic_json_schema__(
+        cls, schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        json_schema = handler(schema)
+        json_schema.update(
+            # simplified regex here for brevity, see the wikipedia link above
+            pattern='^[A-Z]{1,2}[0-9][A-Z0-9]? ?[0-9][A-Z]{2}$',
+            # some example postcodes
+            examples=['SP11 9DG', 'W1J 7BU'],
+        )
+        return json_schema
 
-    def __repr__(self):
-        return f'PostCode({super().__repr__()})'
+    @classmethod
+    def validate(cls, v: str):
+        m = post_code_regex.fullmatch(v.upper())
+        if m:
+            return f'{m.group(1)} {m.group(2)}'
+        else:
+            raise PydanticCustomError('postcode', 'invalid postcode format')
 
 
 class Model(BaseModel):
-    post_code: PostCode
+    post_code: Annotated[str, PostCodeAnnotation]
 
 
 model = Model(post_code='sw8 5el')
 print(model)
+#> post_code='SW8 5EL'
 print(model.post_code)
+#> SW8 5EL
 print(Model.model_json_schema())
-```
-
-Similar validation could be achieved using [`constr(regex=...)`](#constrained-types) except the value won't be
-formatted with a space, the schema would just include the full pattern and the returned value would be a vanilla string.
-
-See [schema](../schema.md) for more details on how the model's schema is generated.
-
-### Arbitrary Types Allowed
-
-You can allow arbitrary types using the `arbitrary_types_allowed` config in the
-[Model Config](../model_config.md).
-
-```py
-from pydantic import BaseModel, ValidationError
-
-
-# This is not a pydantic model, it's an arbitrary class
-class Pet:
-    def __init__(self, name: str):
-        self.name = name
-
-
-class Model(BaseModel):
-    model_config = dict(arbitrary_types_allowed=True)
-    pet: Pet
-    owner: str
-
-
-pet = Pet(name='Hedwig')
-# A simple check of instance type is used to validate the data
-model = Model(owner='Harry', pet=pet)
-print(model)
-#> pet=<__main__.Pet object at 0x0123456789ab> owner='Harry'
-print(model.pet)
-#> <__main__.Pet object at 0x0123456789ab>
-print(model.pet.name)
-#> Hedwig
-print(type(model.pet))
-#> <class '__main__.Pet'>
-try:
-    # If the value is not an instance of the type, it's invalid
-    Model(owner='Harry', pet='Hedwig')
-except ValidationError as e:
-    print(e)
-    """
-    1 validation error for Model
-    pet
-      Input should be an instance of Pet [type=is_instance_of, input_value='Hedwig', input_type=str]
-    """
-# Nothing in the instance of the arbitrary type is checked
-# Here name probably should have been a str, but it's not validated
-pet2 = Pet(name=42)
-model2 = Model(owner='Harry', pet=pet2)
-print(model2)
-#> pet=<__main__.Pet object at 0x0123456789ab> owner='Harry'
-print(model2.pet)
-#> <__main__.Pet object at 0x0123456789ab>
-print(model2.pet.name)
-#> 42
-print(type(model2.pet))
-#> <class '__main__.Pet'>
-```
-
-### Undefined Types Warning
-
-You can suppress the Undefined Types Warning by setting `undefined_types_warning` to `False` in the
-[Model Config](../model_config.md).
-
-```py test="xfail - what do we do with undefined_types_warning?"
-from __future__ import annotations
-
-from pydantic import BaseModel
-
-# This example shows how Book and Person types reference each other.
-# We will demonstrate how to suppress the undefined types warning
-# when define such models.
-
-
-class Book(BaseModel):
-    title: str
-    author: Person  # note the `Person` type is not yet defined
-
-    # Suppress undefined types warning so we can continue defining our models.
-    class Config:
-        undefined_types_warning = False
-
-
-class Person(BaseModel):
-    name: str
-    books_read: list[Book] | None = None
-
-
-# Now, we can rebuild the `Book` model, since the `Person` model is now defined.
-# Note: there's no need to call `model_rebuild()` on `Person`,
-# it's already complete.
-Book.model_rebuild()
-
-# Let's create some instances of our models, to demonstrate that they work.
-python_crash_course = Book(
-    title='Python Crash Course',
-    author=Person(name='Eric Matthes'),
-)
-jane_doe = Person(name='Jane Doe', books_read=[python_crash_course])
-
-assert jane_doe.dict(exclude_unset=True) == {
-    'name': 'Jane Doe',
-    'books_read': [
-        {
-            'title': 'Python Crash Course',
-            'author': {'name': 'Eric Matthes'},
-        },
-    ],
+"""
+{
+    'properties': {
+        'post_code': {
+            'examples': ['SP11 9DG', 'W1J 7BU'],
+            'pattern': '^[A-Z]{1,2}[0-9][A-Z0-9]? ?[0-9][A-Z]{2}$',
+            'title': 'Post Code',
+            'type': 'string',
+        }
+    },
+    'required': ['post_code'],
+    'title': 'Model',
+    'type': 'object',
 }
+"""
+try:
+    Model(post_code='invalid')
+except ValidationError as e:
+    print(e.errors())
+    """
+    [
+        {
+            'type': 'postcode',
+            'loc': ('post_code',),
+            'msg': 'invalid postcode format',
+            'input': 'invalid',
+        }
+    ]
+    """
 ```
+
+Similar validation could be achieved using [`Annotated[str, Field(pattern=...)]`](#constrained-types) except the value won't be formatted with a space, the schema would just include the full pattern and the returned value would be a vanilla string.
+
+See [schema](../json_schema.md) for more details on how the model's schema is generated.
 
 ### Generic Classes as Types
 
 !!! warning
     This is an advanced technique that you might not need in the beginning. In most of
-    the cases you will probably be fine with standard *pydantic* models.
+    the cases you will probably be fine with standard Pydantic models.
 
 You can use
 [Generic Classes](https://docs.python.org/3/library/typing.html#typing.Generic) as
 field types and perform custom validation based on the "type parameters" (or sub-types)
-with `__get_validators__`.
+with `__get_pydantic_core_schema__`.
 
 If the Generic class that you are using as a sub-type has a classmethod
-`__get_validators__` you don't need to use `arbitrary_types_allowed` for it to work.
+`__get_pydantic_core_schema__` you don't need to use [`arbitrary_types_allowed`](../model_config.md#arbitrary-types-allowed) for it to work.
 
-Because you can declare validators that receive the current `field`, you can extract
-the `sub_fields` (from the generic class type parameters) and validate data with them.
+Because the `source_type` parameter is not the same as the `cls` parameter you can use `typing.get_args` (or `typing_extensions.get_args`) to extract the generic parameters.
+Then you can use the `handler` to generate a schema for them by calling `handler.generate_schema`. Note that we do not do something like `handler(get_args(source_type)[0])` because we want to generate an unrelated schema for that generic parameter, not one that is influenced by the current context of `Annotated` metadata and such. This is less important for custom types but crucial for annotated metadata that modifies schema building.
 
-```py test="xfail - what do we do with generic custom types"
-from typing import Generic, TypeVar
+```py
+from dataclasses import dataclass
+from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ValidationError
-from pydantic.fields import ModelField
+from pydantic_core import CoreSchema, core_schema
+from typing_extensions import get_args, get_origin
 
-AgedType = TypeVar('AgedType')
-QualityType = TypeVar('QualityType')
+from pydantic import (
+    BaseModel,
+    GetCoreSchemaHandler,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+)
+
+ItemType = TypeVar('ItemType')
 
 
 # This is not a pydantic model, it's an arbitrary generic class
-class TastingModel(Generic[AgedType, QualityType]):
-    def __init__(self, name: str, aged: AgedType, quality: QualityType):
-        self.name = name
-        self.aged = aged
-        self.quality = quality
+@dataclass
+class Owner(Generic[ItemType]):
+    name: str
+    item: ItemType
 
     @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        origin = get_origin(source_type)
+        if origin is None:  # used as `x: Owner` without params
+            origin = source_type
+            item_tp = Any
+        else:
+            item_tp = get_args(source_type)[0]
+        # both calling handler(...) and handler.generate_schema(...)
+        # would work, but prefer the latter for conceptual and consistency reasons
+        item_schema = handler.generate_schema(item_tp)
 
-    @classmethod
-    # You don't need to add the "ModelField", but it will help your
-    # editor give you completion and catch errors
-    def validate(cls, v, field: ModelField):
-        if not isinstance(v, cls):
-            # The value is not even a TastingModel
-            raise TypeError('Invalid value')
-        if not field.sub_fields:
-            # Generic parameters were not provided so we don't try to validate
-            # them and just return the value as is
+        def val_item(
+            v: Owner[Any], handler: ValidatorFunctionWrapHandler
+        ) -> Owner[Any]:
+            v.item = handler(v.item)
             return v
-        aged_f = field.sub_fields[0]
-        quality_f = field.sub_fields[1]
-        errors = []
-        # Here we don't need the validated value, but we want the errors
-        valid_value, error = aged_f.validate(v.aged, {}, loc='aged')
-        if error:
-            errors.append(error)
-        # Here we don't need the validated value, but we want the errors
-        valid_value, error = quality_f.validate(v.quality, {}, loc='quality')
-        if error:
-            errors.append(error)
-        if errors:
-            raise ValidationError(errors, cls)
-        # Validation passed without errors, return the same instance received
-        return v
+
+        python_schema = core_schema.chain_schema(
+            # `chain_schema` means do the following steps in order:
+            [
+                # Ensure the value is an instance of Owner
+                core_schema.is_instance_schema(cls),
+                # Use the item_schema to validate `items`
+                core_schema.no_info_wrap_validator_function(val_item, item_schema),
+            ]
+        )
+
+        return core_schema.json_or_python_schema(
+            # for JSON accept an object with name and item keys
+            json_schema=core_schema.chain_schema(
+                [
+                    core_schema.typed_dict_schema(
+                        {
+                            'name': core_schema.typed_dict_field(
+                                core_schema.str_schema()
+                            ),
+                            'item': core_schema.typed_dict_field(item_schema),
+                        }
+                    ),
+                    # after validating the json data convert it to python
+                    core_schema.no_info_before_validator_function(
+                        lambda data: Owner(name=data['name'], item=data['item']),
+                        # note that we re-use the same schema here as below
+                        python_schema,
+                    ),
+                ]
+            ),
+            python_schema=python_schema,
+        )
+
+
+class Car(BaseModel):
+    color: str
+
+
+class House(BaseModel):
+    rooms: int
 
 
 class Model(BaseModel):
-    # for wine, "aged" is an int with years, "quality" is a float
-    wine: TastingModel[int, float]
-    # for cheese, "aged" is a bool, "quality" is a str
-    cheese: TastingModel[bool, str]
-    # for thing, "aged" is a Any, "quality" is Any
-    thing: TastingModel
+    car_owner: Owner[Car]
+    home_owner: Owner[House]
 
 
 model = Model(
-    # This wine was aged for 20 years and has a quality of 85.6
-    wine=TastingModel(name='Cabernet Sauvignon', aged=20, quality=85.6),
-    # This cheese is aged (is mature) and has "Good" quality
-    cheese=TastingModel(name='Gouda', aged=True, quality='Good'),
-    # This Python thing has aged "Not much" and has a quality "Awesome"
-    thing=TastingModel(name='Python', aged='Not much', quality='Awesome'),
+    car_owner=Owner(name='John', item=Car(color='black')),
+    home_owner=Owner(name='James', item=House(rooms=3)),
 )
 print(model)
-print(model.wine.aged)
-print(model.wine.quality)
-print(model.cheese.aged)
-print(model.cheese.quality)
-print(model.thing.aged)
+"""
+car_owner=Owner(name='John', item=Car(color='black')) home_owner=Owner(name='James', item=House(rooms=3))
+"""
+
 try:
     # If the values of the sub-types are invalid, we get an error
     Model(
-        # For wine, aged should be an int with the years, and quality a float
-        wine=TastingModel(name='Merlot', aged=True, quality='Kinda good'),
-        # For cheese, aged should be a bool, and quality a str
-        cheese=TastingModel(name='Gouda', aged='yeah', quality=5),
-        # For thing, no type parameters are declared, and we skipped validation
-        # in those cases in the Assessment.validate() function
-        thing=TastingModel(name='Python', aged='Not much', quality='Awesome'),
+        car_owner=Owner(name='John', item=House(rooms=3)),
+        home_owner=Owner(name='James', item=Car(color='black')),
     )
 except ValidationError as e:
     print(e)
+    """
+    2 validation errors for Model
+    wine
+      Input should be a valid number, unable to parse string as an number [type=float_parsing, input_value='Kinda good', input_type=str]
+    cheese
+      Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value='yeah', input_type=str]
+    """
+
+# Similarly with JSON
+model = Model.model_validate_json(
+    '{"car_owner":{"name":"John","item":{"color":"black"}},"home_owner":{"name":"James","item":{"rooms":3}}}'
+)
+print(model)
+"""
+car_owner=Owner(name='John', item=Car(color='black')) home_owner=Owner(name='James', item=House(rooms=3))
+"""
+
+try:
+    Model.model_validate_json(
+        '{"car_owner":{"name":"John","item":{"rooms":3}},"home_owner":{"name":"James","item":{"color":"black"}}}'
+    )
+except ValidationError as e:
+    print(e)
+    """
+    2 validation errors for Model
+    car_owner.item.color
+      Field required [type=missing, input_value={'rooms': 3}, input_type=dict]
+    home_owner.item.rooms
+      Field required [type=missing, input_value={'color': 'black'}, input_type=dict]
+    """
 ```
+
+#### Generic containers
+
+The same idea can be applied to create generic container types, like a custom `Sequence` type:
+
+```python
+from typing import Any, Callable, Sequence, TypeVar
+
+from pydantic_core import ValidationError, core_schema
+from typing_extensions import get_args
+
+from pydantic import BaseModel
+
+T = TypeVar('T')
+
+
+class MySequence(Sequence[T]):
+    def __init__(self, v: Sequence[T]):
+        self.v = v
+
+    def __getitem__(self, i):
+        return self.v[i]
+
+    def __len__(self):
+        return len(self.v)
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: Any, handler: Callable[[Any], core_schema.CoreSchema]
+    ) -> core_schema.CoreSchema:
+        instance_schema = core_schema.is_instance_schema(cls)
+
+        args = get_args(source)
+        if args:
+            # replace the type and rely on Pydantic to generate the right schema
+            # for `Sequence`
+            sequence_t_schema = handler.generate_schema(Sequence[args[0]])
+        else:
+            sequence_t_schema = handler.generate_schema(Sequence)
+
+        non_instance_schema = core_schema.general_after_validator_function(
+            lambda v, i: MySequence(v), sequence_t_schema
+        )
+        return core_schema.union_schema([instance_schema, non_instance_schema])
+
+
+class M(BaseModel):
+    model_config = dict(validate_default=True)
+
+    s1: MySequence = [3]
+
+
+m = M()
+print(m)
+#> s1=<__main__.MySequence object at 0x0123456789ab>
+print(m.s1.v)
+#> [3]
+
+
+class M(BaseModel):
+    s1: MySequence[int]
+
+
+M(s1=[1])
+try:
+    M(s1=['a'])
+except ValidationError as exc:
+    print(exc)
+    """
+    2 validation errors for M
+    s1.is-instance[MySequence]
+      Input should be an instance of MySequence [type=is_instance_of, input_value=['a'], input_type=list]
+    s1.function-after[<lambda>(), json-or-python[json=list[int],python=chain[is-instance[Sequence],function-wrap[sequence_validator()]]]].0
+      Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='a', input_type=str]
+    """
+```
+
+[PEP 593]: https://peps.python.org/pep-0593/
+[PEP 695]: https://peps.python.org/pep-0695/
+[typing-extensions]: https://github.com/python/typing_extensions

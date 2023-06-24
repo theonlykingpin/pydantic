@@ -1,5 +1,4 @@
-"""
-Validator functions for standard library types.
+"""Validator functions for standard library types.
 
 Import of this module is deferred since it contains imports of many standard library modules.
 """
@@ -8,49 +7,18 @@ from __future__ import annotations as _annotations
 
 import re
 import typing
-from collections import OrderedDict, defaultdict, deque
 from ipaddress import IPv4Address, IPv4Interface, IPv4Network, IPv6Address, IPv6Interface, IPv6Network
 from typing import Any
-from uuid import UUID
 
 from pydantic_core import PydanticCustomError, core_schema
-
-
-def mapping_validator(
-    __input_value: typing.Mapping[Any, Any],
-    validator: core_schema.ValidatorFunctionWrapHandler,
-) -> typing.Mapping[Any, Any]:
-    """
-    Validator for `Mapping` types, if required `isinstance(v, Mapping)` has already been called.
-    """
-    v_dict = validator(__input_value)
-    value_type = type(__input_value)
-
-    # the rest of the logic is just re-creating the original type from `v_dict`
-    if value_type == dict:
-        return v_dict
-    elif issubclass(value_type, defaultdict):
-        default_factory = __input_value.default_factory  # type: ignore[attr-defined]
-        return value_type(default_factory, v_dict)
-    else:
-        # best guess at how to re-create the original type, more custom construction logic might be required
-        return value_type(v_dict)  # type: ignore[call-arg]
-
-
-def construct_counter(__input_value: typing.Mapping[Any, Any]) -> typing.Counter[Any]:
-    """
-    Validator for `Counter` types, if required `isinstance(v, Counter)` has already been called.
-    """
-    return typing.Counter(__input_value)
+from pydantic_core._pydantic_core import PydanticKnownError
 
 
 def sequence_validator(
     __input_value: typing.Sequence[Any],
     validator: core_schema.ValidatorFunctionWrapHandler,
 ) -> typing.Sequence[Any]:
-    """
-    Validator for `Sequence` types, isinstance(v, Sequence) has already been called.
-    """
+    """Validator for `Sequence` types, isinstance(v, Sequence) has already been called."""
     value_type = type(__input_value)
 
     # We don't accept any plain string as a sequence
@@ -87,37 +55,54 @@ def import_string(value: Any) -> Any:
 
 
 def _import_string_logic(dotted_path: str) -> Any:
-    """
-    Stolen approximately from django. Import a dotted module path and return the attribute/class designated by the
-    last name in the path. Raise ImportError if the import fails.
+    """Inspired by uvicorn — dotted paths should include a colon before the final item if that item is not a module.
+    (This is necessary to distinguish between a submodule and an attribute when there is a conflict.).
+
+    If the dotted path does not include a colon and the final item is not a valid module, importing as an attribute
+    rather than a submodule will be attempted automatically.
+
+    So, for example, the following values of `dotted_path` result in the following returned values:
+    * 'collections': <module 'collections'>
+    * 'collections.abc': <module 'collections.abc'>
+    * 'collections.abc:Mapping': <class 'collections.abc.Mapping'>
+    * `collections.abc.Mapping`: <class 'collections.abc.Mapping'> (though this is a bit slower than the previous line)
+
+    An error will be raised under any of the following scenarios:
+    * `dotted_path` contains more than one colon (e.g., 'collections:abc:Mapping')
+    * the substring of `dotted_path` before the colon is not a valid module in the environment (e.g., '123:Mapping')
+    * the substring of `dotted_path` after the colon is not an attribute of the module (e.g., 'collections:abc123')
     """
     from importlib import import_module
 
-    try:
-        module_path, class_name = dotted_path.strip(' ').rsplit('.', 1)
-    except ValueError as e:
-        raise ImportError(f'"{dotted_path}" doesn\'t look like a module path') from e
+    components = dotted_path.strip().split(':')
+    if len(components) > 2:
+        raise ImportError(f"Import strings should have at most one ':'; received {dotted_path!r}")
 
-    module = import_module(module_path)
-    try:
-        return getattr(module, class_name)
-    except AttributeError as e:
-        raise ImportError(f'Module "{module_path}" does not define a "{class_name}" attribute') from e
+    module_path = components[0]
+    if not module_path:
+        raise ImportError(f'Import strings should have a nonempty module name; received {dotted_path!r}')
 
-
-def uuid_validator(__input_value: str | bytes) -> UUID:
     try:
-        if isinstance(__input_value, str):
-            return UUID(__input_value)
-        else:
+        module = import_module(module_path)
+    except ModuleNotFoundError as e:
+        if '.' in module_path:
+            # Check if it would be valid if the final item was separated from its module with a `:`
+            maybe_module_path, maybe_attribute = dotted_path.strip().rsplit('.', 1)
             try:
-                return UUID(__input_value.decode())
-            except ValueError:
-                # 16 bytes in big-endian order as the bytes argument fail
-                # the above check
-                return UUID(bytes=__input_value)
-    except ValueError:
-        raise PydanticCustomError('uuid_parsing', 'Input should be a valid UUID, unable to parse string as an UUID')
+                return _import_string_logic(f'{maybe_module_path}:{maybe_attribute}')
+            except ImportError:
+                pass
+            raise ImportError(f'No module named {module_path!r}') from e
+        raise e
+
+    if len(components) > 1:
+        attribute = components[1]
+        try:
+            return getattr(module, attribute)
+        except AttributeError as e:
+            raise ImportError(f'cannot import name {attribute!r} from {module_path!r}') from e
+    else:
+        return module
 
 
 def pattern_either_validator(__input_value: Any) -> typing.Pattern[Any]:
@@ -168,33 +153,6 @@ def compile_pattern(pattern: PatternType) -> typing.Pattern[PatternType]:
         raise PydanticCustomError('pattern_regex', 'Input should be a valid regular expression')
 
 
-def deque_any_validator(__input_value: Any, validator: core_schema.ValidatorFunctionWrapHandler) -> deque[Any]:
-    if isinstance(__input_value, deque):
-        return __input_value
-    else:
-        return deque(validator(__input_value))
-
-
-def deque_typed_validator(__input_value: Any, validator: core_schema.ValidatorFunctionWrapHandler) -> deque[Any]:
-    if isinstance(__input_value, deque):
-        return deque(validator(__input_value), maxlen=__input_value.maxlen)
-    else:
-        return deque(validator(__input_value))
-
-
-def ordered_dict_any_validator(
-    __input_value: Any, validator: core_schema.ValidatorFunctionWrapHandler
-) -> OrderedDict[Any, Any]:
-    if isinstance(__input_value, OrderedDict):
-        return __input_value
-    else:
-        return OrderedDict(validator(__input_value))
-
-
-def ordered_dict_typed_validator(__input_value: list[Any]) -> OrderedDict[Any, Any]:
-    return OrderedDict(__input_value)
-
-
 def ip_v4_address_validator(__input_value: Any) -> IPv4Address:
     if isinstance(__input_value, IPv4Address):
         return __input_value
@@ -216,8 +174,7 @@ def ip_v6_address_validator(__input_value: Any) -> IPv6Address:
 
 
 def ip_v4_network_validator(__input_value: Any) -> IPv4Network:
-    """
-    Assume IPv4Network initialised with a default `strict` argument
+    """Assume IPv4Network initialised with a default `strict` argument.
 
     See more:
     https://docs.python.org/library/ipaddress.html#ipaddress.IPv4Network
@@ -232,8 +189,7 @@ def ip_v4_network_validator(__input_value: Any) -> IPv4Network:
 
 
 def ip_v6_network_validator(__input_value: Any) -> IPv6Network:
-    """
-    Assume IPv6Network initialised with a default `strict` argument
+    """Assume IPv6Network initialised with a default `strict` argument.
 
     See more:
     https://docs.python.org/library/ipaddress.html#ipaddress.IPv6Network
@@ -265,3 +221,51 @@ def ip_v6_interface_validator(__input_value: Any) -> IPv6Interface:
         return IPv6Interface(__input_value)
     except ValueError:
         raise PydanticCustomError('ip_v6_interface', 'Input is not a valid IPv6 interface')
+
+
+def greater_than_validator(x: Any, gt: Any) -> Any:
+    if not (x > gt):
+        raise PydanticKnownError('greater_than', {'gt': str(gt)})
+    return x
+
+
+def greater_than_or_equal_validator(x: Any, ge: Any) -> Any:
+    if not (x >= ge):
+        raise PydanticKnownError('greater_than_equal', {'ge': str(ge)})
+    return x
+
+
+def less_than_validator(x: Any, lt: Any) -> Any:
+    if not (x < lt):
+        raise PydanticKnownError('less_than', {'lt': str(lt)})
+    return x
+
+
+def less_than_or_equal_validator(x: Any, le: Any) -> Any:
+    if not (x <= le):
+        raise PydanticKnownError('less_than_equal', {'le': str(le)})
+    return x
+
+
+def multiple_of_validator(x: Any, multiple_of: Any) -> Any:
+    if not (x % multiple_of == 0):
+        raise PydanticKnownError('multiple_of', {'multiple_of': multiple_of})
+    return x
+
+
+def min_length_validator(x: Any, min_length: Any) -> Any:
+    if not (len(x) >= min_length):
+        raise PydanticKnownError(
+            'too_short',
+            {'field_type': 'Value', 'min_length': min_length, 'actual_length': len(x)},
+        )
+    return x
+
+
+def max_length_validator(x: Any, max_length: Any) -> Any:
+    if not (len(x) < max_length):
+        raise PydanticKnownError(
+            'too_long',
+            {'field_type': 'Value', 'max_length': max_length, 'actual_length': len(x)},
+        )
+    return x

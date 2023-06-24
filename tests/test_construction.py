@@ -2,10 +2,9 @@ import pickle
 from typing import Any, List, Optional
 
 import pytest
-from pydantic_core import ValidationError
+from pydantic_core import PydanticUndefined, ValidationError
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
-from pydantic.fields import Undefined
 
 
 class Model(BaseModel):
@@ -266,6 +265,20 @@ def test_copy_update_unset(copy_method):
     )
 
 
+class ExtraModel(BaseModel, extra='allow'):
+    pass
+
+
+def test_copy_deep_extra(copy_method):
+    class Foo(BaseModel, extra='allow'):
+        pass
+
+    m = Foo(extra=[])
+    assert copy_method(m).extra is m.extra
+    assert copy_method(m, deep=True).extra == m.extra
+    assert copy_method(m, deep=True).extra is not m.extra
+
+
 def test_copy_set_fields(ModelTwo, copy_method):
     m = ModelTwo(a=24, d=Model(a='12'))
     m2 = copy_method(m)
@@ -335,7 +348,7 @@ def test_pickle_undefined(create_module):
     m2 = pickle.loads(pickle.dumps(m))
     assert m2._foo_ == {'private'}
 
-    m._foo_ = Undefined
+    m._foo_ = PydanticUndefined
     m3 = pickle.loads(pickle.dumps(m))
     assert not hasattr(m3, '_foo_')
 
@@ -345,7 +358,7 @@ def test_copy_undefined(ModelTwo, copy_method):
     m2 = copy_method(m)
     assert m2._foo_ == {'private'}
 
-    m._foo_ = Undefined
+    m._foo_ = PydanticUndefined
     m3 = copy_method(m)
     assert not hasattr(m3, '_foo_')
 
@@ -371,6 +384,13 @@ def test_pickle_fields_set():
     assert m.model_dump(exclude_unset=True) == {'a': 24}
     m2 = pickle.loads(pickle.dumps(m))
     assert m2.model_dump(exclude_unset=True) == {'a': 24}
+
+
+def test_pickle_preserves_extra():
+    m = ExtraModel(a=24)
+    assert m.model_extra == {'a': 24}
+    m2 = pickle.loads(pickle.dumps(m))
+    assert m2.model_extra == {'a': 24}
 
 
 def test_copy_update_exclude():
@@ -479,3 +499,12 @@ def test_model_copy(ModelTwo):
 
     m.a = 12
     assert m.a != m2.a
+
+
+def test_pydantic_extra():
+    class Model(BaseModel):
+        model_config = dict(extra='allow')
+        x: int
+
+    m = Model.model_construct(x=1, y=2)
+    assert m.__pydantic_extra__ == {'y': 2}

@@ -7,13 +7,14 @@ from decimal import Decimal
 from enum import Enum
 from ipaddress import IPv4Address, IPv4Interface, IPv4Network, IPv6Address, IPv6Interface, IPv6Network
 from pathlib import Path
-from typing import Generator, Optional, Pattern
+from typing import Any, Generator, Optional, Pattern, Union
 from uuid import UUID
 
 import pytest
-from pydantic_core import SchemaSerializer
+from pydantic_core import CoreSchema, SchemaSerializer, core_schema
 
-from pydantic import BaseModel, ConfigDict, NameEmail
+from pydantic import BaseModel, ConfigDict, GetCoreSchemaHandler, GetJsonSchemaHandler, NameEmail
+from pydantic._internal._config import ConfigWrapper
 from pydantic._internal._generate_schema import GenerateSchema
 from pydantic.color import Color
 from pydantic.dataclasses import dataclass as pydantic_dataclass
@@ -21,6 +22,8 @@ from pydantic.deprecated.json import pydantic_encoder, timedelta_isoformat
 from pydantic.functional_serializers import (
     field_serializer,
 )
+from pydantic.json_schema import JsonSchemaValue
+from pydantic.type_adapter import TypeAdapter
 from pydantic.types import DirectoryPath, FilePath, SecretBytes, SecretStr, condecimal
 
 try:
@@ -75,15 +78,14 @@ class MyModel(BaseModel):
     ],
 )
 def test_json_serialization(ser_type, gen_value, json_output):
-    gen = GenerateSchema(False, None)
-    schema = gen.generate_schema(ser_type)
-    serializer = SchemaSerializer(schema)
-    assert serializer.to_json(gen_value()) == json_output
+    ta: TypeAdapter[Any] = TypeAdapter(ser_type)
+    assert ta.dump_json(gen_value()) == json_output
 
 
 @pytest.mark.skipif(not email_validator, reason='email_validator not installed')
 def test_json_serialization_email():
-    gen = GenerateSchema(False, None)
+    config_wrapper = ConfigWrapper({'arbitrary_types_allowed': False})
+    gen = GenerateSchema(config_wrapper, None)
     schema = gen.generate_schema(NameEmail)
     serializer = SchemaSerializer(schema)
     assert serializer.to_json(NameEmail('foo bar', 'foobaR@example.com')) == b'"foo bar <foobaR@example.com>"'
@@ -125,7 +127,12 @@ def test_model_encoding():
 
 def test_subclass_encoding():
     class SubDate(datetime):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            def val(v: datetime) -> SubDate:
+                return SubDate.fromtimestamp(v.timestamp())
+
+            return core_schema.no_info_after_validator_function(val, handler(datetime))
 
     class Model(BaseModel):
         a: datetime
@@ -138,10 +145,20 @@ def test_subclass_encoding():
 
 def test_subclass_custom_encoding():
     class SubDt(datetime):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            def val(v: datetime) -> SubDt:
+                return SubDt.fromtimestamp(v.timestamp())
+
+            return core_schema.no_info_after_validator_function(val, handler(datetime))
 
     class SubDelta(timedelta):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            def val(v: timedelta) -> SubDelta:
+                return cls(seconds=v.total_seconds())
+
+            return core_schema.no_info_after_validator_function(val, handler(timedelta))
 
     class Model(BaseModel):
         a: SubDt
@@ -338,3 +355,31 @@ class Model(BaseModel):
     M = module.Model
 
     assert M(value=1, nested=M(value=2)).model_dump_json(exclude_none=True) == '{"value":1,"nested":{"value":2}}'
+
+
+def test_resolve_ref_schema_recursive_model():
+    class Model(BaseModel):
+        mini_me: Union['Model', None]
+
+        @classmethod
+        def __get_pydantic_json_schema__(
+            cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+        ) -> JsonSchemaValue:
+            json_schema = super().__get_pydantic_json_schema__(core_schema, handler)
+            json_schema = handler.resolve_ref_schema(json_schema)
+            json_schema['examples'] = {'foo': {'mini_me': None}}
+            return json_schema
+
+    # insert_assert(Model.model_json_schema())
+    assert Model.model_json_schema() == {
+        '$defs': {
+            'Model': {
+                'examples': {'foo': {'mini_me': None}},
+                'properties': {'mini_me': {'anyOf': [{'$ref': '#/$defs/Model'}, {'type': 'null'}]}},
+                'required': ['mini_me'],
+                'title': 'Model',
+                'type': 'object',
+            }
+        },
+        'allOf': [{'$ref': '#/$defs/Model'}],
+    }

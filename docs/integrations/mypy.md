@@ -1,4 +1,4 @@
-Pydantic works well with [mypy](http://mypy-lang.org/) right out of the box.
+Pydantic works well with [mypy](http://mypy-lang.org.md) right out of the box.
 
 However, Pydantic also ships with a mypy plugin that adds a number of important pydantic-specific
 features to mypy that improve its ability to type-check your code.
@@ -28,14 +28,15 @@ Model()  # will raise a validation error for age and list_of_ints
 Without any special configuration, mypy catches one of the errors:
 
 ```
-13: error: "Model" has no attribute "middle_name"
+16: error: "Model" has no attribute "middle_name"  [attr-defined]
 ```
 
 But [with the plugin enabled](#enabling-the-plugin), it catches both:
 ```
-13: error: "Model" has no attribute "middle_name"
-16: error: Missing named argument "age" for "Model"
-16: error: Missing named argument "list_of_ints" for "Model"
+9: error: Untyped fields disallowed  [pydantic-field]
+16: error: "Model" has no attribute "middle_name"  [attr-defined]
+17: error: Missing named argument "age" for "Model"  [call-arg]
+17: error: Missing named argument "list_of_ints" for "Model"  [call-arg]
 ```
 
 With the pydantic mypy plugin, you can fearlessly refactor your models knowing mypy will catch any mistakes
@@ -60,18 +61,9 @@ mypy \
 For your code to pass with `--strict-optional`, you need to to use `Optional[]` or an alias of `Optional[]`
 for all fields with `None` as the default. (This is standard with mypy.)
 
-Pydantic provides a few useful optional or union types:
-
-* `NoneStr` aka. `Optional[str]`
-* `NoneBytes` aka. `Optional[bytes]`
-* `StrBytes` aka. `Union[str, bytes]`
-* `NoneStrBytes` aka. `Optional[StrBytes]`
-
-If these aren't sufficient you can of course define your own.
-
 ### Other Pydantic interfaces
 
-Pydantic [dataclasses](/usage/dataclasses/) and the [`validate_arguments` decorator](/usage/validation_decorator/)
+Pydantic [dataclasses](../usage/dataclasses.md) and the [`validate_call` decorator](../usage/validation_decorator.md)
 should also work well with mypy.
 
 ## Mypy Plugin Capabilities
@@ -81,29 +73,25 @@ should also work well with mypy.
   keyword arguments.
 * If `Config.populate_by_name=True`, the generated signature will use the field names,
   rather than aliases.
-* If `Config.extra="forbid"` and you don't make use of dynamically-determined aliases, the generated signature
+* If `Config.extra='forbid'` and you don't make use of dynamically-determined aliases, the generated signature
   will not allow unexpected inputs.
-* **Optional:** If the [`init_forbid_extra` **plugin setting**](#plugin-settings) is set to `True`, unexpected inputs to
-  `__init__` will raise errors even if `Config.extra` is not `"forbid"`.
-* **Optional:** If the [`init_typed` **plugin setting**](#plugin-settings) is set to `True`, the generated signature
+* **Optional:** If the [`init_forbid_extra` **plugin setting**](#configuring-the-plugin) is set to `True`, unexpected inputs to
+  `__init__` will raise errors even if `Config.extra` is not `'forbid'`.
+* **Optional:** If the [`init_typed` **plugin setting**](#configuring-the-plugin) is set to `True`, the generated signature
   will use the types of the model fields (otherwise they will be annotated as `Any` to allow parsing).
 
 ### Generate a typed signature for `Model.model_construct`
-* The [`model_construct`](/usage/models/#creating-models-without-validation) method is a faster alternative to `__init__`
-  when input data is known to be valid and does not need to be parsed. But because this method performs no runtime
-  validation, static checking is important to detect errors.
+* The [`model_construct`](../usage/models.md#creating-models-without-validation) method is an alternative to `__init__`
+  when input data is known to be valid and should not be parsed. Because this method performs no runtime validation,
+  static checking is important to detect errors.
 
-### Respect `Config.allow_mutation`
-* If `Config.allow_mutation` is `False`, you'll get a mypy error if you try to change
-  the value of a model field; cf. [faux immutability](/usage/models/#faux-immutability).
-
-### Respect `Config.from_attributes`
-* If `Config.from_attributes` is `False`, you'll get a mypy error if you try to call `.from_orm()`;
-  cf. [ORM mode](/usage/models/#orm-mode-aka-arbitrary-class-instances)
+### Respect `Config.frozen`
+* If `Config.frozen` is `True`, you'll get a mypy error if you try to change
+  the value of a model field; cf. [faux immutability](../usage/models.md#faux-immutability).
 
 ### Generate a signature for `dataclasses`
-* classes decorated with [`@pydantic.dataclasses.dataclass`](/usage/dataclasses/) are type checked the same as standard Python dataclasses
-* The `@pydantic.dataclasses.dataclass` decorator accepts a `config` keyword argument which has the same meaning as [the `Config` sub-class](/usage/model_config/).
+* classes decorated with [`@pydantic.dataclasses.dataclass`](../usage/dataclasses.md) are type checked the same as standard Python dataclasses
+* The `@pydantic.dataclasses.dataclass` decorator accepts a `config` keyword argument which has the same meaning as [the `Config` sub-class](../usage/model_config.md).
 
 ### Respect the type of the `Field`'s `default` and `default_factory`
 * Field with both a `default` and a `default_factory` will result in an error during static checking.
@@ -116,7 +104,7 @@ should also work well with mypy.
 ## Optional Capabilities:
 ### Prevent the use of required dynamic aliases
 
-* If the [`warn_required_dynamic_aliases` **plugin setting**](#plugin-settings) is set to `True`, you'll get a mypy
+* If the [`warn_required_dynamic_aliases` **plugin setting**](#configuring-the-plugin) is set to `True`, you'll get a mypy
   error any time you use a dynamically-determined alias or alias generator on a model with
   `Config.populate_by_name=False`.
 * This is important because if such aliases are present, mypy cannot properly type check calls to `__init__`.
@@ -126,7 +114,7 @@ should also work well with mypy.
 
 To enable the plugin, just add `pydantic.mypy` to the list of plugins in your
 [mypy config file](https://mypy.readthedocs.io/en/latest/config_file.html)
-(this could be `mypy.ini` or `setup.cfg`).
+(this could be `mypy.ini`, `pyproject.toml`, or `setup.cfg`).
 
 To get started, all you need to do is create a `mypy.ini` file with following contents:
 ```ini

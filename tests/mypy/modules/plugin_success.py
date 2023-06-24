@@ -1,6 +1,6 @@
 from typing import Any, ClassVar, Generic, List, Optional, TypeVar, Union
 
-from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator, validator
+from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator, model_validator, validator
 from pydantic.dataclasses import dataclass
 
 
@@ -25,7 +25,7 @@ SelfReferencingModel.model_rebuild()
 model = Model(x=1, y='y')
 Model(x=1, y='y', z='z')
 model.x = 2
-model.model_validate(model.__dict__)  # TODO: Change this to .model_validate(model) when possible
+model.model_validate(model)
 
 self_referencing_model = SelfReferencingModel(submodel=SelfReferencingModel(submodel=None))
 
@@ -49,8 +49,6 @@ InheritingModel.model_validate(model.__dict__)
 
 
 class ForwardReferencingModel(Model):
-    model_config = dict(undefined_types_warning=False)
-
     future: 'FutureModel'
 
 
@@ -290,5 +288,10 @@ def foo() -> None:
     class MyModel(BaseModel):
         number: int
         custom_validator = get_my_custom_validator('number')  # type: ignore[pydantic-field]
+
+        @model_validator(mode='before')
+        @classmethod
+        def validate_values(cls, values: Any) -> Any:
+            return values
 
     MyModel(number=2)

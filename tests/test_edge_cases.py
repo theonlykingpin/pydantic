@@ -23,7 +23,7 @@ from typing import (
 
 import pytest
 from dirty_equals import HasRepr, IsStr
-from pydantic_core import PydanticSerializationError, core_schema
+from pydantic_core import ErrorDetails, InitErrorDetails, PydanticSerializationError, core_schema
 from typing_extensions import Annotated, get_args
 
 from pydantic import (
@@ -599,7 +599,6 @@ def test_include_exclude_defaults():
     assert m.model_dump(exclude=['a'], exclude_unset=True) == {'b': 2, 'e': 5, 'f': 7}
 
 
-@pytest.mark.xfail(reason='pydantic-core include/exclude does not wrap negative ints')
 def test_advanced_exclude():
     class SubSubModel(BaseModel):
         a: str
@@ -622,7 +621,6 @@ def test_advanced_exclude():
     assert m.model_dump(exclude={'e': ..., 'f': {'d'}}) == {'f': {'c': 'foo'}}
 
 
-@pytest.mark.xfail(reason='pydantic-core include/exclude does not wrap negative ints')
 def test_advanced_exclude_by_alias():
     class SubSubModel(BaseModel):
         a: str
@@ -651,7 +649,6 @@ def test_advanced_exclude_by_alias():
     assert m.model_dump(exclude=excludes, by_alias=True) == {'f_alias': {'c_alias': 'foo'}}
 
 
-@pytest.mark.xfail(reason='pydantic-core include/exclude does not wrap negative ints')
 def test_advanced_value_include():
     class SubSubModel(BaseModel):
         a: str
@@ -672,7 +669,6 @@ def test_advanced_value_include():
     assert m.model_dump(include={'f': {'d': {0: ..., -1: {'b'}}}}) == {'f': {'d': [{'a': 'a', 'b': 'b'}, {'b': 'e'}]}}
 
 
-@pytest.mark.xfail(reason='pydantic-core include/exclude does not wrap negative ints')
 def test_advanced_value_exclude_include():
     class SubSubModel(BaseModel):
         a: str
@@ -1181,24 +1177,6 @@ def test_optional_required():
     ]
 
 
-@pytest.mark.xfail(reason='items yielded by __get_validators__ are not inspected for valid signatures')
-def test_invalid_validator():
-    class InvalidValidator:
-        @classmethod
-        def __get_validators__(cls):
-            yield cls.has_wrong_arguments
-
-        @classmethod
-        def has_wrong_arguments(cls, value, bar):
-            pass
-
-    with pytest.raises(errors.PydanticUserError, match='Invalid signature for validator'):
-
-        class InvalidValidatorModel(BaseModel):
-            model_config = dict(arbitrary_types_allowed=True)
-            x: InvalidValidator = ...
-
-
 def test_unable_to_infer():
     with pytest.raises(
         errors.PydanticUserError,
@@ -1237,7 +1215,7 @@ def test_multiple_errors():
             'type': 'decimal_parsing',
             'loc': (
                 'a',
-                'lax-or-strict[lax=function-after[validate(), union[is-instance[Decimal],int,float,constrained-str]],strict=custom-error[function-after[validate(), is-instance[Decimal]]]]',  # noqa: E501
+                'lax-or-strict[lax=function-after[validate(), union[json-or-python[json=function-after[Decimal(), union[int,float,constrained-str]],python=is-instance[Decimal]],int,float,constrained-str]],strict=custom-error[function-after[validate(), json-or-python[json=function-after[Decimal(), union[int,float,constrained-str]],python=is-instance[Decimal]]]]]',  # noqa: E501
             ),
             'msg': 'Input should be a valid decimal',
             'input': 'foobar',
@@ -1897,7 +1875,6 @@ def test_required_any():
     }
 
 
-@pytest.mark.xfail(reason='need to modify loc of ValidationError')
 def test_custom_generic_validators():
     T1 = TypeVar('T1')
     T2 = TypeVar('T2')
@@ -1921,12 +1898,27 @@ def test_custom_generic_validators():
             t1_f = TypeAdapter(args[0]).validate_python
             t2_f = TypeAdapter(args[1]).validate_python
 
-            def validate(v, info):
+            def convert_to_init_error(e: ErrorDetails, loc: str) -> InitErrorDetails:
+                init_e = {'type': e['type'], 'loc': e['loc'] + (loc,), 'input': e['input']}
+                if 'ctx' in e:
+                    init_e['ctx'] = e['ctx']
+                return init_e
+
+            def validate(v, _info):
                 if not args:
                     return v
-                # TODO: Collect these errors, rather than stopping early, and modify the loc to make the test pass
-                t1_f(v.t1)
-                t2_f(v.t2)
+                try:
+                    v.t1 = t1_f(v.t1)
+                except ValidationError as exc:
+                    raise ValidationError.from_exception_data(
+                        exc.title, [convert_to_init_error(e, 't1') for e in exc.errors()]
+                    ) from exc
+                try:
+                    v.t2 = t2_f(v.t2)
+                except ValidationError as exc:
+                    raise ValidationError.from_exception_data(
+                        exc.title, [convert_to_init_error(e, 't2') for e in exc.errors()]
+                    ) from exc
                 return v
 
             return core_schema.general_after_validator_function(validate, schema)
@@ -2026,7 +2018,7 @@ def test_custom_generic_disallowed():
 
     match = (
         r'Unable to generate pydantic-core schema for (.*)MyGen\[str, bool\](.*). '
-        r'Setting `arbitrary_types_allowed=True` in the model_config may prevent this error.'
+        r'Set `arbitrary_types_allowed=True` in the model_config to ignore this error'
     )
     with pytest.raises(TypeError, match=match):
 
@@ -2258,7 +2250,6 @@ def test_model_issubclass():
     assert not issubclass(Custom, BaseModel)
 
 
-@pytest.mark.xfail(reason='"long int", see details below')
 def test_long_int():
     """
     see https://github.com/pydantic/pydantic/issues/1477 and in turn, https://github.com/python/cpython/issues/95778
@@ -2267,41 +2258,21 @@ def test_long_int():
     class Model(BaseModel):
         x: int
 
-    # TODO: The next line now raises the following error:
-    #     E       pydantic_core._pydantic_core.ValidationError: 1 validation error for Model
-    #     E       x
-    #     E         Input should be a finite number [type=finite_number,
-    #     input_value='111111111111111111111111...11111111111111111111111', input_type=str]
-    #   Do we need to resolve this? How hard would that be in pydantic_core? Is it worth it?
-    #   -
-    #   "in pydantic-core we use an i64, which constrains the max and min values. Since that's massively more
-    #   performant, and there are very few real world uses for int > i64:MAX, the error is correct."
-    #   https://github.com/pydantic/pydantic/pull/5151#discussion_r1130693762
-    #   -
-    #   I think before modifying this test and removing the xfail, we should create a new test
-    #   that handles the following line without failure using the is-instance approach described in the comment
-    #   linked above.
     assert Model(x='1' * 4_300).x == int('1' * 4_300)
-    assert Model(x=b'1' * 4_300).x == int('1' * 4_300)
-    assert Model(x=bytearray(b'1' * 4_300)).x == int('1' * 4_300)
 
     too_long = '1' * 4_301
     with pytest.raises(ValidationError) as exc_info:
         Model(x=too_long)
 
+    # insert_assert(exc_info.value.errors(include_url=False))
     assert exc_info.value.errors(include_url=False) == [
         {
+            'type': 'int_parsing_size',
             'loc': ('x',),
-            'msg': 'value is not a valid integer',
-            'type': 'type_error.integer',
-        },
+            'msg': 'Unable to parse input string as an integer, exceeded maximum size',
+            'input': too_long,
+        }
     ]
-
-    too_long_b = too_long.encode('utf-8')
-    with pytest.raises(ValidationError):
-        Model(x=too_long_b)
-    with pytest.raises(ValidationError):
-        Model(x=bytearray(too_long_b))
 
     # this used to hang indefinitely
     with pytest.raises(ValidationError):
@@ -2375,7 +2346,7 @@ def test_abstractmethod_missing_for_all_decorators(bases):
         @computed_field
         @property
         @abstractmethod
-        def my_computed_field(self):
+        def my_computed_field(self) -> Any:
             raise NotImplementedError
 
     class Square(AbstractSquare):
@@ -2401,8 +2372,6 @@ def test_abstractmethod_missing_for_all_decorators(bases):
 def test_generic_wrapped_forwardref():
     class Operation(BaseModel):
         callbacks: list['PathItem']
-
-        model_config = {'undefined_types_warning': False}
 
     class PathItem(BaseModel):
         pass
@@ -2450,13 +2419,10 @@ def test_invalid_forward_ref_model():
     with pytest.raises(error, **kwargs):
 
         class M(BaseModel):
-            model_config = {'undefined_types_warning': False}
             B: ForwardRef('B') = Field(default=None)
 
     # The solution:
     class A(BaseModel):
-        model_config = {'undefined_types_warning': False}
-
         B: ForwardRef('__types["B"]') = Field()  # F821
 
     assert A.model_fields['B'].annotation == ForwardRef('__types["B"]')  # F821
@@ -2469,10 +2435,10 @@ def test_invalid_forward_ref_model():
     class C(BaseModel):
         pass
 
-    assert not A.__pydantic_model_complete__
+    assert not A.__pydantic_complete__
     types = {'B': B}
     A.model_rebuild(_types_namespace={'__types': types})
-    assert A.__pydantic_model_complete__
+    assert A.__pydantic_complete__
 
     assert A(B=B()).B == B()
     with pytest.raises(ValidationError) as exc_info:

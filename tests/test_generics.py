@@ -29,13 +29,14 @@ from typing import (
 )
 
 import pytest
-from dirty_equals import HasRepr
-from pydantic_core import core_schema
-from typing_extensions import Annotated, Literal, OrderedDict, TypeVarTuple, Unpack
+from dirty_equals import HasRepr, IsStr
+from pydantic_core import CoreSchema, core_schema
+from typing_extensions import Annotated, Literal, OrderedDict, TypeVarTuple, Unpack, get_args
 
 from pydantic import (
     BaseModel,
     Field,
+    GetCoreSchemaHandler,
     Json,
     PositiveInt,
     PydanticSchemaGenerationError,
@@ -642,7 +643,7 @@ def test_nested():
     OuterT_SameType[int](i=inner_int)
     OuterT_SameType[str](i=inner_str)
     # TODO: The next line is failing, but passes in v1.
-    #   Might need to do something smart for Any, or re-parse-from-dict if the pydantic_generic_origin is the same..
+    #   Should re-parse-from-dict if the pydantic_generic_origin is the same
     # OuterT_SameType[str](i=inner_int_any)
     OuterT_SameType[int](i=inner_int_any.model_dump())
 
@@ -1103,40 +1104,74 @@ def test_replace_types():
 
 def test_replace_types_with_user_defined_generic_type_field():
     """Test that using user defined generic types as generic model fields are handled correctly."""
-
     T = TypeVar('T')
     KT = TypeVar('KT')
     VT = TypeVar('VT')
 
     class CustomCounter(Counter[T]):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            return core_schema.no_info_after_validator_function(cls, handler(Counter[get_args(source_type)[0]]))
 
     class CustomDefaultDict(DefaultDict[KT, VT]):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            keys_type, values_type = get_args(source_type)
+            return core_schema.no_info_after_validator_function(
+                lambda x: cls(x.default_factory, x), handler(DefaultDict[keys_type, values_type])
+            )
 
     class CustomDeque(Deque[T]):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            return core_schema.no_info_after_validator_function(cls, handler(Deque[get_args(source_type)[0]]))
 
     class CustomDict(Dict[KT, VT]):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            keys_type, values_type = get_args(source_type)
+            return core_schema.no_info_after_validator_function(cls, handler(Dict[keys_type, values_type]))
 
     class CustomFrozenset(FrozenSet[T]):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            return core_schema.no_info_after_validator_function(cls, handler(FrozenSet[get_args(source_type)[0]]))
 
     class CustomIterable(Iterable[T]):
-        pass
+        def __init__(self, iterable):
+            self.iterable = iterable
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self.iterable)
+
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            return core_schema.no_info_after_validator_function(cls, handler(Iterable[get_args(source_type)[0]]))
 
     class CustomList(List[T]):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            return core_schema.no_info_after_validator_function(cls, handler(List[get_args(source_type)[0]]))
 
     class CustomMapping(Mapping[KT, VT]):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            keys_type, values_type = get_args(source_type)
+            return handler(Mapping[keys_type, values_type])
 
     class CustomOrderedDict(OrderedDict[KT, VT]):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            keys_type, values_type = get_args(source_type)
+            return core_schema.no_info_after_validator_function(cls, handler(OrderedDict[keys_type, values_type]))
 
     class CustomSet(Set[T]):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            return core_schema.no_info_after_validator_function(cls, handler(Set[get_args(source_type)[0]]))
 
     class CustomTuple(Tuple[T]):
         pass
@@ -1174,15 +1209,15 @@ def test_replace_types_with_user_defined_generic_type_field():
 
     # The following assertions are just to document the current behavior, and should
     # be updated if/when we do a better job of respecting the exact annotated type
-    assert type(m.counter_field) is Counter.__origin__
-    assert type(m.default_dict_field) is dict
-    assert type(m.deque_field) is deque
-    assert type(m.dict_field) is dict
+    assert type(m.counter_field) is CustomCounter
+    # assert type(m.default_dict_field) is CustomDefaultDict
+    assert type(m.deque_field) is CustomDeque
+    assert type(m.dict_field) is CustomDict
     assert type(m.frozenset_field) is CustomFrozenset
-    assert type(m.iterable_field).__name__ == 'ValidatorIterator'
+    assert type(m.iterable_field) is CustomIterable
     assert type(m.list_field) is CustomList
-    assert type(m.mapping_field) is dict
-    assert type(m.ordered_dict_field) is OrderedDict.__origin__
+    assert type(m.mapping_field) is dict  # this is determined in CustomMapping.__get_pydantic_core_schema__
+    assert type(m.ordered_dict_field) is CustomOrderedDict
     assert type(m.set_field) is CustomSet
     assert type(m.tuple_field) is tuple
 
@@ -1192,10 +1227,7 @@ def test_replace_types_with_user_defined_generic_type_field():
         'deque_field': deque([True, False]),
         'dict_field': {'a': 1},
         'frozenset_field': frozenset({False, True}),
-        'iterable_field': HasRepr(
-            'SerializationIterator(index=0, '
-            'iterator=ValidatorIterator(index=0, schema=Some(Bool(BoolValidator { strict: false }))))'
-        ),
+        'iterable_field': HasRepr(IsStr(regex=r'SerializationIterator\(index=0, iterator=.*CustomIterable.*')),
         'list_field': [True, False],
         'mapping_field': {'a': 2},
         'ordered_dict_field': {'a': 1},
@@ -1213,8 +1245,9 @@ def test_custom_sequence_behavior():
     with pytest.raises(
         PydanticSchemaGenerationError,
         match=(
-            'Unable to generate pydantic-core schema for custom subclasses of Sequence.'
-            ' Please define `__get_pydantic_core_schema__`.'
+            r'Unable to generate pydantic-core schema for .*'
+            ' Set `arbitrary_types_allowed=True` in the model_config to ignore this error'
+            ' or implement `__get_pydantic_core_schema__` on your type to fully support it'
         ),
     ):
 
@@ -1392,6 +1425,37 @@ def test_generic_with_referenced_generic_type_1():
     ReferenceModel[int]
 
 
+def test_generic_with_referenced_generic_type_bound():
+    T = TypeVar('T', bound=int)
+
+    class ModelWithType(BaseModel, Generic[T]):
+        # Type resolves to type origin of "type" which is non-subscriptible for
+        # python < 3.9 so we want to make sure it works for other versions
+        some_type: Type[T]
+
+    class ReferenceModel(BaseModel, Generic[T]):
+        abstract_base_with_type: ModelWithType[T]
+
+    class MyInt(int):
+        ...
+
+    ReferenceModel[MyInt]
+
+
+def test_generic_with_referenced_generic_type_constraints():
+    T = TypeVar('T', int, str)
+
+    class ModelWithType(BaseModel, Generic[T]):
+        # Type resolves to type origin of "type" which is non-subscriptible for
+        # python < 3.9 so we want to make sure it works for other versions
+        some_type: Type[T]
+
+    class ReferenceModel(BaseModel, Generic[T]):
+        abstract_base_with_type: ModelWithType[T]
+
+    ReferenceModel[int]
+
+
 def test_generic_with_referenced_nested_typevar():
     T = TypeVar('T')
 
@@ -1444,12 +1508,8 @@ def test_generic_recursive_models(create_module):
         class Model1(BaseModel, Generic[T]):
             ref: 'Model2[T]'
 
-            model_config = dict(undefined_types_warning=False)
-
         class Model2(BaseModel, Generic[T]):
             ref: Union[T, Model1[T]]
-
-            model_config = dict(undefined_types_warning=False)
 
         Model1.model_rebuild()
 
@@ -1497,14 +1557,10 @@ def test_generic_recursive_models_separate_parameters(create_module):
         class Model1(BaseModel, Generic[T]):
             ref: 'Model2[T]'
 
-            model_config = dict(undefined_types_warning=False)
-
         S = TypeVar('S')
 
         class Model2(BaseModel, Generic[S]):
             ref: Union[S, Model1[S]]
-
-            model_config = dict(undefined_types_warning=False)
 
         Model1.model_rebuild()
 
@@ -1562,15 +1618,11 @@ def test_generic_recursive_models_repeated_separate_parameters(create_module):
             ref: 'Model2[T]'
             ref2: Union['Model2[T]', None] = None
 
-            model_config = dict(undefined_types_warning=False)
-
         S = TypeVar('S')
 
         class Model2(BaseModel, Generic[S]):
             ref: Union[S, Model1[S]]
             ref2: Union[S, Model1[S], None] = None
-
-            model_config = dict(undefined_types_warning=False)
 
         Model1.model_rebuild()
 
@@ -1621,17 +1673,11 @@ def test_generic_recursive_models_triple(create_module):
         class A1(BaseModel, Generic[T1]):
             a1: 'A2[T1]'
 
-            model_config = dict(undefined_types_warning=False)
-
         class A2(BaseModel, Generic[T2]):
             a2: 'A3[T2]'
 
-            model_config = dict(undefined_types_warning=False)
-
         class A3(BaseModel, Generic[T3]):
             a3: Union['A1[T3]', T3]
-
-            model_config = dict(undefined_types_warning=False)
 
         A1.model_rebuild()
 
@@ -1667,12 +1713,8 @@ def test_generic_recursive_models_with_a_concrete_parameter(create_module):
             a: V1
             m: 'M2[V2]'
 
-            model_config = dict(undefined_types_warning=False)
-
         class M2(BaseModel, Generic[V3]):
             m: Union[M1[int, V3], V3]
-
-            model_config = dict(undefined_types_warning=False)
 
         M1.model_rebuild()
 
@@ -1684,7 +1726,7 @@ def test_generic_recursive_models_with_a_concrete_parameter(create_module):
 
 def test_generic_recursive_models_complicated(create_module):
     """
-    TODO: If we drop the use of LimitedDict and use WeakValueDictionary only, this test will fail if run by itself.
+    Note: If we drop the use of LimitedDict and use WeakValueDictionary only, this test will fail if run by itself.
         This is due to weird behavior with the WeakValueDictionary used for caching.
         As part of the next batch of generics work, we should attempt to fix this if possible.
         In the meantime, if this causes issues, or the test otherwise starts failing, please make it xfail
@@ -1704,17 +1746,11 @@ def test_generic_recursive_models_complicated(create_module):
         class A1(BaseModel, Generic[T1]):
             a1: 'A2[T1]'
 
-            model_config = dict(undefined_types_warning=False)
-
         class A2(BaseModel, Generic[T2]):
             a2: 'A3[T2]'
 
-            model_config = dict(undefined_types_warning=False)
-
         class A3(BaseModel, Generic[T3]):
             a3: Union[A1[T3], T3]
-
-            model_config = dict(undefined_types_warning=False)
 
         A1.model_rebuild()
 
@@ -1724,12 +1760,8 @@ def test_generic_recursive_models_complicated(create_module):
         class B1(BaseModel, Generic[S1]):
             a1: 'B2[S1]'
 
-            model_config = dict(undefined_types_warning=False)
-
         class B2(BaseModel, Generic[S2]):
             a2: 'B1[S2]'
-
-            model_config = dict(undefined_types_warning=False)
 
         B1.model_rebuild()
 
@@ -1742,12 +1774,8 @@ def test_generic_recursive_models_complicated(create_module):
             b: B1[V2]
             m: 'M2[V1]'
 
-            model_config = dict(undefined_types_warning=False)
-
         class M2(BaseModel, Generic[V3]):
             m: Union[M1[V3, int], V3]
-
-            model_config = dict(undefined_types_warning=False)
 
         M1.model_rebuild()
 
@@ -1831,7 +1859,9 @@ def test_generic_with_user_defined_generic_field():
     T = TypeVar('T')
 
     class GenericList(List[T]):
-        pass
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            return core_schema.no_info_after_validator_function(GenericList, handler(List[get_args(source_type)[0]]))
 
     class Model(BaseModel, Generic[T]):
         field: GenericList[T]
@@ -1988,7 +2018,6 @@ def test_multi_inheritance_generic_defaults():
     assert C(a=1, c=...).model_dump() == {'a': 1, 'b': None, 'c': ..., 'x': 'a', 'y': 'b', 'z': 'c'}
 
 
-@pytest.mark.xfail(reason="'Json type's JSON schema; see issue #5072")
 def test_parse_generic_json():
     T = TypeVar('T')
 
@@ -2002,15 +2031,28 @@ def test_parse_generic_json():
     record = MessageWrapper[Payload](message=raw)
     assert isinstance(record.message, Payload)
 
-    schema = record.model_json_schema()
-    # This seems appropriate if the goal is to represent the "serialization" schema, not the validation schema.
-    # We may need a better approach for types with different inputs and outputs; I opened an issue for this in #5072
-    assert schema['properties'] == {'message': {'$ref': '#/definitions/Payload'}}
-    assert schema['definitions']['Payload'] == {
-        'title': 'Payload',
+    validation_schema = record.model_json_schema(mode='validation')
+    assert validation_schema == {
+        'properties': {'message': {'format': 'json-string', 'title': 'Message', 'type': 'string'}},
+        'required': ['message'],
+        'title': 'MessageWrapper[test_parse_generic_json.<locals>.Payload]',
         'type': 'object',
-        'properties': {'payload_field': {'title': 'Payload Field', 'type': 'string'}},
-        'required': ['payload_field'],
+    }
+
+    serialization_schema = record.model_json_schema(mode='serialization')
+    assert serialization_schema == {
+        '$defs': {
+            'Payload': {
+                'properties': {'payload_field': {'title': 'Payload Field', 'type': 'string'}},
+                'required': ['payload_field'],
+                'title': 'Payload',
+                'type': 'object',
+            }
+        },
+        'properties': {'message': {'allOf': [{'$ref': '#/$defs/Payload'}], 'title': 'Message'}},
+        'required': ['message'],
+        'title': 'MessageWrapper[test_parse_generic_json.<locals>.Payload]',
+        'type': 'object',
     }
 
 
@@ -2318,7 +2360,10 @@ def test_generic_intenum_bound():
 
 
 @pytest.mark.skipif(sys.version_info < (3, 11), reason='requires python 3.11 or higher')
-@pytest.mark.xfail(reason='TODO: Variadic generic parametrization is not supported yet')
+@pytest.mark.xfail(
+    reason='TODO: Variadic generic parametrization is not supported yet;'
+    ' Issue: https://github.com/pydantic/pydantic/issues/5804'
+)
 def test_variadic_generic_init():
     class ComponentModel(BaseModel):
         pass
@@ -2351,7 +2396,9 @@ def test_variadic_generic_init():
 
 
 @pytest.mark.skipif(sys.version_info < (3, 11), reason='requires python 3.11 or higher')
-@pytest.mark.xfail(reason='TODO: Variadic fields are not supported yet')
+@pytest.mark.xfail(
+    reason='TODO: Variadic fields are not supported yet; Issue: https://github.com/pydantic/pydantic/issues/5804'
+)
 def test_variadic_generic_with_variadic_fields():
     class ComponentModel(BaseModel):
         pass

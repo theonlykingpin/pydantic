@@ -17,6 +17,7 @@ from pydantic import (
     ConfigDict,
     Field,
     FieldValidationInfo,
+    PydanticUserError,
     ValidationError,
     ValidationInfo,
     ValidatorFunctionWrapHandler,
@@ -32,7 +33,7 @@ V1_VALIDATOR_DEPRECATION_MATCH = r'Pydantic V1 style `@validator` validators are
 
 
 def test_annotated_validator_after() -> None:
-    MyInt = Annotated[int, AfterValidator(lambda x: x if x != -1 else 0)]
+    MyInt = Annotated[int, AfterValidator(lambda x, _info: x if x != -1 else 0)]
 
     class Model(BaseModel):
         x: MyInt
@@ -45,7 +46,7 @@ def test_annotated_validator_after() -> None:
 
 
 def test_annotated_validator_before() -> None:
-    FloatMaybeInf = Annotated[float, BeforeValidator(lambda x: x if x != 'zero' else 0.0)]
+    FloatMaybeInf = Annotated[float, BeforeValidator(lambda x, _info: x if x != 'zero' else 0.0)]
 
     class Model(BaseModel):
         x: FloatMaybeInf
@@ -56,7 +57,7 @@ def test_annotated_validator_before() -> None:
 
 
 def test_annotated_validator_plain() -> None:
-    MyInt = Annotated[int, PlainValidator(lambda x: x if x != -1 else 0)]
+    MyInt = Annotated[int, PlainValidator(lambda x, _info: x if x != -1 else 0)]
 
     class Model(BaseModel):
         x: MyInt
@@ -212,8 +213,8 @@ def test_int_validation():
         }
     ]
 
-    # Doesn't raise ValidationError for number > (2 ^ 63) - 1 and limits them to (2 ^ 63) - 1
-    assert Model(a=(2**63) + 100).a == (2**63) - 1
+    # Doesn't raise ValidationError for number > (2 ^ 63) - 1
+    assert Model(a=(2**63) + 100).a == (2**63) + 100
 
 
 @pytest.mark.parametrize('value', [2.2250738585072011e308, float('nan'), float('inf')])
@@ -273,11 +274,8 @@ def test_deque_validation():
             'input': 'a',
         }
     ]
-    with pytest.raises(ValidationError) as exc_info:
-        Model(a={'1'})
-    assert exc_info.value.errors(include_url=False) == [
-        {'type': 'list_type', 'loc': ('a',), 'msg': 'Input should be a valid list', 'input': {'1'}}
-    ]
+
+    assert Model(a={'1'}).a == deque([1])
     assert Model(a=[4, 5]).a == deque([4, 5])
     assert Model(a=(6,)).a == deque([6])
 
@@ -1015,6 +1013,21 @@ def test_validation_each_item():
     assert Model(foobar={1: 1}).foobar == {1: 2}
 
 
+def test_validation_each_item_invalid_type():
+    with pytest.raises(
+        TypeError, match=re.escape('@validator(..., each_item=True)` cannot be applied to fields with a schema of int')
+    ):
+        with pytest.warns(DeprecationWarning, match=V1_VALIDATOR_DEPRECATION_MATCH):
+
+            class Model(BaseModel):
+                foobar: int
+
+                @validator('foobar', each_item=True)
+                @classmethod
+                def check_foobar(cls, v: Any):
+                    ...
+
+
 def test_validation_each_item_nullable():
     with pytest.warns(DeprecationWarning, match=V1_VALIDATOR_DEPRECATION_MATCH):
 
@@ -1566,9 +1579,7 @@ def test_assignment_validator_cls():
     assert validator_calls == 2
 
 
-@pytest.mark.xfail(
-    sys.version_info[:2] == (3, 8), reason='https://github.com/python/cpython/issues/103592', strict=False
-)
+@pytest.mark.skipif(sys.version_info[:2] == (3, 8), reason='https://github.com/python/cpython/issues/103592')
 def test_literal_validator():
     class Model(BaseModel):
         a: Literal['foo']
@@ -1600,8 +1611,6 @@ def test_literal_validator_str_enum():
 
     my_foo = Foo.model_validate({'bar': 'fiz', 'barfiz': 'fiz', 'fizfuz': 'fiz'})
     assert my_foo.bar is Bar.FIZ
-    # TODO: this doesn't pass, `my_foo.barfiz == 'fiz'`
-    # Is this an intentional behavior change?
     assert my_foo.barfiz is Bar.FIZ
     assert my_foo.fizfuz is Bar.FIZ
 
@@ -1611,7 +1620,7 @@ def test_literal_validator_str_enum():
     assert my_foo.fizfuz is Bar.FUZ
 
 
-@pytest.mark.xfail(
+@pytest.mark.skipif(
     sys.version_info[:2] == (3, 8), reason='https://github.com/python/cpython/issues/103592', strict=False
 )
 def test_nested_literal_validator():
@@ -1769,7 +1778,6 @@ def test_validating_assignment_pre_root_validator_fail():
     ]
 
 
-@pytest.mark.xfail(reason='Something weird going on with model_validator and assignment')
 def test_validating_assignment_model_validator_before_fail():
     class Model(BaseModel):
         current_value: float = Field(..., alias='current')
@@ -1779,7 +1787,7 @@ def test_validating_assignment_model_validator_before_fail():
 
         @model_validator(mode='before')
         def values_are_not_string(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-            print(values)
+            assert isinstance(values, dict)
             if any(isinstance(x, str) for x in values.values()):
                 raise ValueError('values cannot be a string')
             return values
@@ -2519,6 +2527,23 @@ def test_root_validator_allow_reuse_inheritance():
     assert Child(x=1).model_dump() == {'x': 4}
 
 
+def test_bare_root_validator():
+    with pytest.raises(
+        PydanticUserError,
+        match=re.escape(
+            'If you use `@root_validator` with pre=False (the default) you MUST specify `skip_on_failure=True`.'
+            ' Note that `@root_validator` is deprecated and should be replaced with `@model_validator`.'
+        ),
+    ):
+        with pytest.warns(DeprecationWarning, match='Pydantic V1 style `@root_validator` validators are deprecated.'):
+
+            class Model(BaseModel):
+                @root_validator
+                @classmethod
+                def validate_values(cls, values):
+                    return values
+
+
 def test_validator_with_underscore_name() -> None:
     """
     https://github.com/pydantic/pydantic/issues/5252
@@ -2532,3 +2557,32 @@ def test_validator_with_underscore_name() -> None:
         _normalize_name = field_validator('name')(f)
 
     assert Model(name='Adrian').name == 'adrian'
+
+
+@pytest.mark.parametrize(
+    'mode,config,input_str',
+    (
+        ('before', {}, "type=value_error, input_value='123', input_type=str"),
+        ('before', {'hide_input_in_errors': False}, "type=value_error, input_value='123', input_type=str"),
+        ('before', {'hide_input_in_errors': True}, 'type=value_error'),
+        ('after', {}, "type=value_error, input_value='123', input_type=str"),
+        ('after', {'hide_input_in_errors': False}, "type=value_error, input_value='123', input_type=str"),
+        ('after', {'hide_input_in_errors': True}, 'type=value_error'),
+        ('plain', {}, "type=value_error, input_value='123', input_type=str"),
+        ('plain', {'hide_input_in_errors': False}, "type=value_error, input_value='123', input_type=str"),
+        ('plain', {'hide_input_in_errors': True}, 'type=value_error'),
+    ),
+)
+def test_validator_function_error_hide_input(mode, config, input_str):
+    class Model(BaseModel):
+        x: str
+
+        model_config = ConfigDict(**config)
+
+        @field_validator('x', mode=mode)
+        @classmethod
+        def check_a1(cls, v: str) -> str:
+            raise ValueError('foo')
+
+    with pytest.raises(ValidationError, match=re.escape(f'Value error, foo [{input_str}]')):
+        Model(x='123')

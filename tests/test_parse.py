@@ -1,9 +1,11 @@
 from typing import List, Tuple
 
 import pytest
+from pydantic_core import CoreSchema
 
-from pydantic import BaseModel, ValidationError, model_validator, parse_obj_as
+from pydantic import BaseModel, GetJsonSchemaHandler, ValidationError, model_validator, parse_obj_as
 from pydantic.functional_serializers import model_serializer
+from pydantic.json_schema import JsonSchemaValue
 
 
 class Model(BaseModel):
@@ -48,8 +50,7 @@ def test_model_validate_wrong_model():
 
 def test_root_model_error():
     with pytest.raises(
-        TypeError,
-        match='__root__ models are no longer supported in v2',
+        TypeError, match="To define root models, use `pydantic.RootModel` rather than a field called '__root__'"
     ):
 
         class MyModel(BaseModel):
@@ -77,17 +78,18 @@ def test_model_validate_root():
                 return data
 
         @classmethod
-        def __get_pydantic_json_schema__(cls, core_schema, handler):
+        def __get_pydantic_json_schema__(
+            cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+        ) -> JsonSchemaValue:
             json_schema = handler(core_schema)
-            return json_schema['properties']['root']
+            root = handler.resolve_ref_schema(json_schema)['properties']['root']
+            return root
 
     # Validation
     m = MyModel.model_validate('a')
     assert m.root == 'a'
 
     # Serialization
-    # TODO: Possible concern — `model_dump` is annotated as returning dict[str, Any] — is that okay, given
-    #   model_serializer could change that? Should we try to reflect it in the mypy plugin?
     assert m.model_dump() == {'root': 'a'}
     assert m.model_dump_json() == '"a"'
 

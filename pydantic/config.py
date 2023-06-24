@@ -45,31 +45,84 @@ class ConfigDict(TypedDict, total=False):
     """A dictionary-like class for configuring Pydantic models.
 
     Attributes:
-        title (Optional[str]): Optional title for the configuration. Defaults to None.
-        str_to_lower (bool): Whether to convert strings to lowercase. Defaults to False.
-        str_to_upper (bool): Whether to convert strings to uppercase. Defaults to False.
-        str_strip_whitespace (bool): Whether to strip whitespace from strings. Defaults to False.
-        str_min_length (int): The minimum length for strings. Defaults to None.
-        str_max_length (int): The maximum length for strings. Defaults to None.
-        extra (ExtraValues): Extra values to include in this configuration. Defaults to None.
-        frozen (bool): Whether to freeze the configuration. Defaults to False.
-        populate_by_name (bool): Whether to populate fields by name. Defaults to False.
-        use_enum_values (bool): Whether to use enum values. Defaults to False.
-        validate_assignment (bool): Whether to validate assignments. Defaults to False.
-        arbitrary_types_allowed (bool): Whether to allow arbitrary types. Defaults to True.
-        undefined_types_warning (bool): Whether to show a warning for undefined types. Defaults to True.
-        from_attributes (bool): Whether to set attributes from the configuration. Defaults to False.
-        loc_by_alias (bool): Whether to use the alias for error `loc`s. Defaults to True.
-        alias_generator (Optional[Callable[[str], str]]): A function to generate aliases. Defaults to None.
-        ignored_types (Tuple[type, ...]): A tuple of types to ignore. Defaults to ().
-        allow_inf_nan (bool): Whether to allow infinity and NaN. Defaults to False.
-        strict (bool): Whether to make the configuration strict. Defaults to False.
-        revalidate_instances (Literal['always', 'never', 'subclass-instances']):
-            When and how to revalidate models and dataclasses during validation. Defaults to 'never'.
-        ser_json_timedelta (Literal['iso8601', 'float']): The format of JSON serialized timedeltas.
-            Defaults to 'iso8601'.
-        ser_json_bytes (Literal['utf8', 'base64']): The encoding of JSON serialized bytes. Defaults to 'utf8'.
-        validate_default (bool): Whether to validate default values during validation. Defaults to False.
+        title: The title for the generated JSON schema. Defaults to `None`.
+        str_to_lower: Whether to convert all characters to lowercase for str & bytes types. Defaults to `False`.
+        str_to_upper: Whether to convert all characters to uppercase for str & bytes types. Defaults to `False`.
+        str_strip_whitespace: Whether to strip leading and trailing whitespace for str & bytes types.
+            Defaults to `False`.
+        str_min_length: The minimum length for str & bytes types. Defaults to `None`.
+        str_max_length: The maximum length for str & bytes types. Defaults to `None`.
+        extra: Whether to ignore, allow, or forbid extra attributes during model initialization.
+            Accepts the string values of `'ignore'`, `'allow'`, or `'forbid'`. Defaults to `'ignore'`.
+
+            - `'forbid'` will cause validation to fail if extra attributes are included.
+            - `'ignore'` will silently ignore any extra attributes.
+            - `'allow'` will assign the attributes to the model.
+
+            See [the dedicated section](/usage/model_config#extra-attributes).
+        frozen: Whether or not models are faux-immutable, i.e. whether `__setattr__` is allowed, and also generates
+            a `__hash__()` method for the model. This makes instances of the model potentially hashable if all the
+            attributes are hashable. Defaults to `False`.
+
+            !!! note
+                On V1, this setting was called `allow_mutation`, and was `True` by default.
+        populate_by_name: Whether an aliased field may be populated by its name as given by the model
+            attribute, as well as the alias. Defaults to `False`.
+
+            !!! note
+                The name of this configuration setting was changed in **v2.0** from
+                `allow_population_by_alias` to `populate_by_name`.
+        use_enum_values: Whether to populate models with the `value` property of enums, rather than the raw enum.
+            This may be useful if you want to serialize `model.model_dump()` later. Defaults to `False`.
+        validate_assignment: Whether to perform validation on *assignment* to attributes. Defaults to `False`.
+        arbitrary_types_allowed: Whether to allow arbitrary user types for fields (they are validated simply by
+            checking if the value is an instance of the type). If `False`, `RuntimeError` will be raised on model
+            declaration. Defaults to `False`.
+
+            See [the dedicated section](/usage/model_config/#arbitrary-types-allowed).
+        from_attributes: Whether to allow model creation from object attributes. Defaults to `False`.
+
+            !!! note
+                The name of this configuration setting was changed in **v2.0** from `orm_mode` to `from_attributes`.
+        loc_by_alias: Whether to use the alias for error `loc`s. Defaults to `True`.
+        alias_generator: a callable that takes a field name and returns an alias for it.
+
+            See [the dedicated section](/usage/model_config#alias-generator).
+        ignored_types: A tuple of types that may occur as values of class attributes without annotations. This is
+            typically used for custom descriptors (classes that behave like `property`). If an attribute is set on a
+            class without an annotation and has a type that is not in this tuple (or otherwise recognized by
+            _pydantic_), an error will be raised. Defaults to `()`.
+        allow_inf_nan: Whether to allow infinity (`+inf` an `-inf`) and NaN values to float fields. Defaults to `True`.
+        json_schema_extra: A dict or callable to provide extra JSON schema properties. Defaults to `None`.
+        strict: If `True`, strict validation is applied to all fields on the model.
+            See [Strict Mode](../usage/models.md#strict-mode) for details.
+        revalidate_instances: When and how to revalidate models and dataclasses during validation. Accepts the string
+            values of `'never'`, `'always'` and `'subclass-instances'`. Defaults to `'never'`.
+
+            - `'never'` will not revalidate models and dataclasses during validation
+            - `'always'` will revalidate models and dataclasses during validation
+            - `'subclass-instances'` will revalidate models and dataclasses during validation if the instance is a
+                subclass of the model or dataclass
+
+            See [the dedicated section](/usage/model_config#revalidate-instances).
+        ser_json_timedelta: The format of JSON serialized timedeltas. Accepts the string values of `'iso8601'` and
+            `'float'`. Defaults to `'iso8601'`.
+
+            - `'iso8601'` will serialize timedeltas to ISO 8601 durations.
+            - `'float'` will serialize timedeltas to the total number of seconds.
+        ser_json_bytes: The encoding of JSON serialized bytes. Accepts the string values of `'utf8'` and `'base64'`.
+            Defaults to `'utf8'`.
+
+            - `'utf8'` will serialize bytes to UTF-8 strings.
+            - `'base64'` will serialize bytes to base64 strings.
+        validate_default: Whether to validate default values during validation. Defaults to `False`.
+        protected_namespaces: A `tuple` of strings that prevent model to have field which conflict with them.
+            Defaults to `('model_', )`).
+
+            See [the dedicated section](/usage/model_config#protected-namespaces).
+        hide_input_in_errors: Whether to hide inputs when printing errors. Defaults to `False`.
+
+            See [the dedicated section](/usage/model_config#hide-input-in-errors).
     """
 
     title: str | None
@@ -83,8 +136,7 @@ class ConfigDict(TypedDict, total=False):
     populate_by_name: bool
     use_enum_values: bool
     validate_assignment: bool
-    arbitrary_types_allowed: bool  # TODO default True, or remove
-    undefined_types_warning: bool  # TODO review docs
+    arbitrary_types_allowed: bool
     from_attributes: bool
     # whether to use the used alias (or first alias for "field required" errors) instead of field_names
     # to construct error `loc`s, default True
@@ -104,6 +156,8 @@ class ConfigDict(TypedDict, total=False):
     validate_default: bool
     # whether to validate the return value from call validator
     validate_return: bool
+    protected_namespaces: tuple[str, ...]
+    hide_input_in_errors: bool
 
 
 __getattr__ = getattr_migration(__name__)

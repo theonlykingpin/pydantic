@@ -4,13 +4,12 @@ import re
 import sys
 from collections import defaultdict
 from copy import deepcopy
+from dataclasses import dataclass
 from enum import Enum
 from typing import (
     Any,
     Callable,
     ClassVar,
-    Counter,
-    DefaultDict,
     Dict,
     Generic,
     List,
@@ -24,12 +23,14 @@ from typing import (
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic_core import CoreSchema, core_schema
 from typing_extensions import Annotated, Final, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    GetCoreSchemaHandler,
     PrivateAttr,
     PydanticUndefinedAnnotation,
     PydanticUserError,
@@ -39,6 +40,7 @@ from pydantic import (
     constr,
     field_validator,
 )
+from pydantic.type_adapter import TypeAdapter
 
 
 def test_success():
@@ -348,6 +350,31 @@ def test_field_order_is_preserved_with_extra():
     assert repr(model) == "Model(a=1, b='2', c=3.0, d=4)"
     assert str(model.model_dump()) == "{'a': 1, 'b': '2', 'c': 3.0, 'd': 4}"
     assert str(model.model_dump_json()) == '{"a":1,"b":"2","c":3.0,"d":4}'
+
+
+def test_extra_broken_via_pydantic_extra_interference():
+    """
+    At the time of writing this test there is `_model_construction.model_extra_getattr` being assigned to model's
+    `__getattr__`. The method then expects `BaseModel.__pydantic_extra__` isn't `None`. Both this actions happen when
+    `model_config.extra` is set to `True`. However, this behavior could be accidentally broken in a subclass of
+    `BaseModel`. In that case `AttributeError` should be thrown when `__getattr__` is being accessed essentially
+    disabling the `extra` functionality.
+    """
+
+    class BrokenExtraBaseModel(BaseModel):
+        def model_post_init(self, __context: Any) -> None:
+            super().model_post_init(__context)
+            object.__setattr__(self, '__pydantic_extra__', None)
+
+    class Model(BrokenExtraBaseModel):
+        model_config = ConfigDict(extra='allow')
+
+    m = Model(extra_field='some extra value')
+
+    with pytest.raises(AttributeError) as e:
+        m.extra_field
+
+    assert e.value.args == ("'Model' object has no attribute 'extra_field'",)
 
 
 def test_set_attr(UltraSimpleModel):
@@ -1010,9 +1037,9 @@ def test_model_iteration():
         ),
         pytest.param(
             {'foos': {-1: {'b'}}},
-            {'c': 3, 'foos': [{'a': 1, 'b': 2}, {'a': 3, 'b': 4}]},
+            {'c': 3, 'foos': [{'a': 1, 'b': 2}, {'a': 3}]},
             None,
-            id='negative indexes are ignored',
+            id='negative indexes',
         ),
     ],
 )
@@ -1381,8 +1408,6 @@ def test_recursive_cycle_with_repeated_field():
     class A(BaseModel):
         b: 'B'
 
-        model_config = {'undefined_types_warning': False}
-
     class B(BaseModel):
         a1: Optional[A] = None
         a2: Optional[A] = None
@@ -1589,39 +1614,9 @@ def test_inherited_model_field_copy():
     assert id(image_2) in {id(image) for image in item.images}
 
 
-def test_mapping_retains_type_subclass():
+def test_mapping_subclass_as_input():
     class CustomMap(dict):
         pass
-
-    class Model(BaseModel):
-        x: Mapping[str, Mapping[str, int]]
-
-    m = Model(x=CustomMap(outer=CustomMap(inner=42)))
-    assert isinstance(m.x, CustomMap)
-    assert isinstance(m.x['outer'], CustomMap)
-    assert m.x['outer']['inner'] == 42
-
-
-def test_mapping_retains_type_defaultdict():
-    class Model(BaseModel):
-        x: Mapping[str, int]
-
-    d = defaultdict(int)
-    d['foo'] = '2'
-    d['bar']
-
-    m = Model(x=d)
-    assert isinstance(m.x, defaultdict)
-    assert m.x['foo'] == 2
-    assert m.x['bar'] == 0
-
-
-def test_mapping_retains_type_fallback_error():
-    class CustomMap(dict):
-        def __init__(self, *args, **kwargs):
-            if args or kwargs:
-                raise TypeError('test')
-            super().__init__(*args, **kwargs)
 
     class Model(BaseModel):
         x: Mapping[str, int]
@@ -1630,8 +1625,14 @@ def test_mapping_retains_type_fallback_error():
     d['one'] = 1
     d['two'] = 2
 
-    with pytest.raises(TypeError, match='test'):
-        Model(x=d)
+    v = Model(x=d).x
+    # we don't promise that this will or will not be a CustomMap
+    # all we promise is that it _will_ be a mapping
+    assert isinstance(v, Mapping)
+    # but the current behavior is that it will be a dict, not a CustomMap
+    # so document that here
+    assert not isinstance(v, CustomMap)
+    assert v == {'one': 1, 'two': 2}
 
 
 def test_typing_coercion_dict():
@@ -1649,59 +1650,6 @@ VT = TypeVar('VT')
 class MyDict(Dict[KT, VT]):
     def __repr__(self):
         return f'MyDict({super().__repr__()})'
-
-
-def test_dict_subclasses_bare():
-    class Model(BaseModel):
-        a: MyDict
-
-    assert repr(Model(a=MyDict({'a': 1})).a) == "MyDict({'a': 1})"
-    assert repr(Model(a=MyDict({b'x': (1, 2)})).a) == "MyDict({b'x': (1, 2)})"
-
-
-def test_dict_subclasses_typed():
-    class Model(BaseModel):
-        a: MyDict[str, int]
-
-    assert repr(Model(a=MyDict({'a': 1})).a) == "MyDict({'a': 1})"
-
-
-def test_typing_coercion_defaultdict():
-    class Model(BaseModel):
-        x: DefaultDict[int, str]
-
-    d = defaultdict(str)
-    d['1']
-    m = Model(x=d)
-    assert isinstance(m.x, defaultdict)
-    assert repr(m.x) == "defaultdict(<class 'str'>, {1: ''})"
-
-
-def test_typing_coercion_counter():
-    class Model(BaseModel):
-        x: Counter[str]
-
-    m = Model(x={'a': 10})
-    assert isinstance(m.x, Counter)
-    assert repr(m.x) == "Counter({'a': 10})"
-
-
-def test_typing_counter_value_validation():
-    class Model(BaseModel):
-        x: Counter[str]
-
-    with pytest.raises(ValidationError) as exc_info:
-        Model(x={'a': 'a'})
-
-    # insert_assert(exc_info.value.errors(include_url=False))
-    assert exc_info.value.errors(include_url=False) == [
-        {
-            'type': 'int_parsing',
-            'loc': ('x', 'a'),
-            'msg': 'Input should be a valid integer, unable to parse string as an integer',
-            'input': 'a',
-        }
-    ]
 
 
 def test_class_kwargs_config():
@@ -1918,13 +1866,13 @@ def test_post_init_not_called_without_override():
 
 
 def test_deeper_recursive_model():
-    class A(BaseModel, undefined_types_warning=False):
+    class A(BaseModel):
         b: 'B'
 
-    class B(BaseModel, undefined_types_warning=False):
+    class B(BaseModel):
         c: 'C'
 
-    class C(BaseModel, undefined_types_warning=False):
+    class C(BaseModel):
         a: Optional['A']
 
     A.model_rebuild()
@@ -1936,11 +1884,11 @@ def test_deeper_recursive_model():
 
 
 def test_model_rebuild_localns():
-    class A(BaseModel, undefined_types_warning=False):
+    class A(BaseModel):
         x: int
 
-    class B(BaseModel, undefined_types_warning=False):
-        a: 'Model'  # noqa F821
+    class B(BaseModel):
+        a: 'Model'  # noqa: F821
 
     B.model_rebuild(_types_namespace={'Model': A})
 
@@ -1948,11 +1896,27 @@ def test_model_rebuild_localns():
     assert m.model_dump() == {'a': {'x': 1}}
     assert isinstance(m.a, A)
 
-    class C(BaseModel, undefined_types_warning=False):
-        a: 'Model'  # noqa F821
+    class C(BaseModel):
+        a: 'Model'  # noqa: F821
 
     with pytest.raises(PydanticUndefinedAnnotation, match="name 'Model' is not defined"):
         C.model_rebuild(_types_namespace={'A': A})
+
+
+def test_model_rebuild_zero_depth():
+    class Model(BaseModel):
+        x: 'X_Type'
+
+    X_Type = str
+
+    with pytest.raises(NameError, match='X_Type'):
+        Model.model_rebuild(_parent_namespace_depth=0)
+
+    Model.__pydantic_parent_namespace__.update({'X_Type': int})
+    Model.model_rebuild(_parent_namespace_depth=0)
+
+    m = Model(x=42)
+    assert m.model_dump() == {'x': 42}
 
 
 @pytest.fixture(scope='session', name='InnerEqualityModel')
@@ -2042,6 +2006,40 @@ def test_model_equality_private_attrs(InnerEqualityModel):
     assert m3 == m3_equal
 
 
+def test_model_copy_extra():
+    class Model(BaseModel, extra='allow'):
+        x: int
+
+    m = Model(x=1, y=2)
+    assert m.model_dump() == {'x': 1, 'y': 2}
+    assert m.model_extra == {'y': 2}
+    m2 = m.model_copy()
+    assert m2.model_dump() == {'x': 1, 'y': 2}
+    assert m2.model_extra == {'y': 2}
+
+    m3 = m.model_copy(update={'x': 4, 'z': 3})
+    assert m3.model_dump() == {'x': 4, 'y': 2, 'z': 3}
+    assert m3.model_extra == {'y': 2, 'z': 3}
+
+    m4 = m.model_copy(update={'x': 4, 'z': 3})
+    assert m4.model_dump() == {'x': 4, 'y': 2, 'z': 3}
+    assert m4.model_extra == {'y': 2, 'z': 3}
+
+    m = Model(x=1, a=2)
+    m.__pydantic_extra__ = None
+    m5 = m.model_copy(update={'x': 4, 'b': 3})
+    assert m5.model_dump() == {'x': 4, 'b': 3}
+    assert m5.model_extra == {'b': 3}
+
+
+def test_model_parametrized_name_not_generic():
+    class Model(BaseModel):
+        x: int
+
+    with pytest.raises(TypeError, match='Concrete names should only be generated for generic models.'):
+        Model.model_parametrized_name(())
+
+
 def test_model_equality_generics():
     T = TypeVar('T')
 
@@ -2089,14 +2087,10 @@ def test_model_validate_strict() -> None:
     assert LaxModel.model_validate({'x': '1'}, strict=False) == LaxModel(x=1)
     with pytest.raises(ValidationError) as exc_info:
         LaxModel.model_validate({'x': '1'}, strict=True)
+    # there's no such thing on the model itself
+    # insert_assert(exc_info.value.errors(include_url=False))
     assert exc_info.value.errors(include_url=False) == [
-        {
-            'type': 'model_class_type',
-            'loc': (),
-            'msg': 'Input should be an instance of LaxModel',
-            'input': {'x': '1'},
-            'ctx': {'class_name': 'LaxModel'},
-        }
+        {'type': 'int_type', 'loc': ('x',), 'msg': 'Input should be a valid integer', 'input': '1'}
     ]
 
     with pytest.raises(ValidationError) as exc_info:
@@ -2107,14 +2101,9 @@ def test_model_validate_strict() -> None:
     assert StrictModel.model_validate({'x': '1'}, strict=False) == StrictModel(x=1)
     with pytest.raises(ValidationError) as exc_info:
         LaxModel.model_validate({'x': '1'}, strict=True)
+    # insert_assert(exc_info.value.errors(include_url=False))
     assert exc_info.value.errors(include_url=False) == [
-        {
-            'type': 'model_class_type',
-            'loc': (),
-            'msg': 'Input should be an instance of LaxModel',
-            'input': {'x': '1'},
-            'ctx': {'class_name': 'LaxModel'},
-        }
+        {'type': 'int_type', 'loc': ('x',), 'msg': 'Input should be a valid integer', 'input': '1'}
     ]
 
 
@@ -2222,12 +2211,387 @@ def test_model_validate_with_context():
     assert OuterModel.model_validate({'inner': {'x': 2}}, context={'multiplier': 3}).inner.x == 6
 
 
+def test_extra_equality():
+    class MyModel(BaseModel, extra='allow'):
+        pass
+
+    assert MyModel(x=1) != MyModel()
+
+
 def test_equality_delegation():
     from unittest.mock import ANY
-
-    from pydantic import BaseModel
 
     class MyModel(BaseModel):
         foo: str
 
     assert MyModel(foo='bar') == ANY
+
+
+def test_recursion_loop_error():
+    class Model(BaseModel):
+        x: List['Model']
+
+    data = {'x': []}
+    data['x'].append(data)
+    with pytest.raises(ValidationError) as exc_info:
+        Model(**data)
+    assert repr(exc_info.value.errors(include_url=False)[0]) == (
+        "{'type': 'recursion_loop', 'loc': ('x', 0, 'x', 0), 'msg': "
+        "'Recursion error - cyclic reference detected', 'input': {'x': [{...}]}}"
+    )
+
+
+def test_protected_namespace_default():
+    with pytest.raises(NameError, match='Field "model_prefixed_field" has conflict with protected namespace "model_"'):
+
+        class Model(BaseModel):
+            model_prefixed_field: str
+
+
+def test_custom_protected_namespace():
+    with pytest.raises(NameError, match='Field "test_field" has conflict with protected namespace "test_"'):
+
+        class Model(BaseModel):
+            # this field won't raise error because we changed the default value for the
+            # `protected_namespaces` config.
+            model_prefixed_field: str
+            test_field: str
+
+            model_config = ConfigDict(protected_namespaces=('test_',))
+
+
+def test_multiple_protected_namespace():
+    with pytest.raises(
+        NameError, match='Field "also_protect_field" has conflict with protected namespace "also_protect_"'
+    ):
+
+        class Model(BaseModel):
+            also_protect_field: str
+
+            model_config = ConfigDict(protected_namespaces=('protect_me_', 'also_protect_'))
+
+
+def test_model_get_core_schema() -> None:
+    class Model(BaseModel):
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            assert handler(int) == {'type': 'int'}
+            assert handler.generate_schema(int) == {'type': 'int'}
+            return handler(source_type)
+
+    Model()
+
+
+def test_nested_types_ignored():
+    from pydantic import BaseModel
+
+    class NonNestedType:
+        pass
+
+    # Defining a nested type does not error
+    class GoodModel(BaseModel):
+        class NestedType:
+            pass
+
+        # You can still store such types on the class by annotating as a ClassVar
+        MyType: ClassVar[Type[Any]] = NonNestedType
+
+        # For documentation: you _can_ give multiple names to a nested type and it won't error:
+        # It might be better if it did, but this seems to be rare enough that I'm not concerned
+        x = NestedType
+
+    assert GoodModel.MyType is NonNestedType
+    assert GoodModel.x is GoodModel.NestedType
+
+    with pytest.raises(PydanticUserError, match='A non-annotated attribute was detected'):
+
+        class BadModel(BaseModel):
+            x = NonNestedType
+
+
+def test_validate_python_from_attributes() -> None:
+    class Model(BaseModel):
+        x: int
+
+    class ModelFromAttributesTrue(Model):
+        model_config = ConfigDict(from_attributes=True)
+
+    class ModelFromAttributesFalse(Model):
+        model_config = ConfigDict(from_attributes=False)
+
+    @dataclass
+    class UnrelatedClass:
+        x: int = 1
+
+    input = UnrelatedClass(1)
+
+    for from_attributes in (False, None):
+        with pytest.raises(ValidationError) as exc_info:
+            Model.model_validate(UnrelatedClass(), from_attributes=from_attributes)
+        assert exc_info.value.errors(include_url=False) == [
+            {'type': 'dict_type', 'loc': (), 'msg': 'Input should be a valid dictionary', 'input': input}
+        ]
+
+    res = Model.model_validate(UnrelatedClass(), from_attributes=True)
+    assert res == Model(x=1)
+
+    with pytest.raises(ValidationError) as exc_info:
+        ModelFromAttributesTrue.model_validate(UnrelatedClass(), from_attributes=False)
+    assert exc_info.value.errors(include_url=False) == [
+        {'type': 'dict_type', 'loc': (), 'msg': 'Input should be a valid dictionary', 'input': input}
+    ]
+
+    for from_attributes in (True, None):
+        res = ModelFromAttributesTrue.model_validate(UnrelatedClass(), from_attributes=from_attributes)
+        assert res == ModelFromAttributesTrue(x=1)
+
+    for from_attributes in (False, None):
+        with pytest.raises(ValidationError) as exc_info:
+            ModelFromAttributesFalse.model_validate(UnrelatedClass(), from_attributes=from_attributes)
+        assert exc_info.value.errors(include_url=False) == [
+            {'type': 'dict_type', 'loc': (), 'msg': 'Input should be a valid dictionary', 'input': input}
+        ]
+
+    res = ModelFromAttributesFalse.model_validate(UnrelatedClass(), from_attributes=True)
+    assert res == ModelFromAttributesFalse(x=1)
+
+
+def test_model_signature_annotated() -> None:
+    class Model(BaseModel):
+        x: Annotated[int, 123]
+
+    # we used to accidentally convert `__metadata__` to a list
+    # which caused things like `typing.get_args()` to fail
+    assert Model.__signature__.parameters['x'].annotation.__metadata__ == (123,)
+
+
+def test_get_core_schema_unpacks_refs_for_source_type() -> None:
+    # use a list to track since we end up calling `__get_pydantic_core_schema__` multiple times for models
+    # e.g. InnerModel.__get_pydantic_core_schema__ gets called:
+    # 1. When InnerModel is defined
+    # 2. When OuterModel is defined
+    # 3. When we use the TypeAdapter
+    received_schemas: dict[str, list[str]] = defaultdict(list)
+
+    @dataclass
+    class Marker:
+        name: str
+
+        def __get_pydantic_core_schema__(self, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            schema = handler(source_type)
+            received_schemas[self.name].append(schema['type'])
+            return schema
+
+    class InnerModel(BaseModel):
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            schema = handler(source_type)
+            received_schemas['InnerModel'].append(schema['type'])
+            schema['metadata'] = schema.get('metadata', {})
+            schema['metadata']['foo'] = 'inner was here!'
+            return deepcopy(schema)
+
+    class OuterModel(BaseModel):
+        inner: Annotated[InnerModel, Marker('Marker("inner")')]
+
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            schema = handler(source_type)
+            received_schemas['OuterModel'].append(schema['type'])
+            return schema
+
+    ta = TypeAdapter(Annotated[OuterModel, Marker('Marker("outer")')])
+
+    # super hacky check but it works in all cases and avoids a complex and fragile iteration over CoreSchema
+    # the point here is to verify that `__get_pydantic_core_schema__`
+    assert 'inner was here' in str(ta.core_schema)
+
+    assert received_schemas == {
+        'InnerModel': ['model', 'model', 'model'],
+        'Marker("inner")': ['definition-ref', 'definition-ref'],
+        'OuterModel': ['model', 'model'],
+        'Marker("outer")': ['definition-ref'],
+    }
+
+
+def test_get_core_schema_return_new_ref() -> None:
+    class InnerModel(BaseModel):
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            schema = handler(source_type)
+            schema = deepcopy(schema)
+            schema['metadata'] = schema.get('metadata', {})
+            schema['metadata']['foo'] = 'inner was here!'
+            return deepcopy(schema)
+
+    class OuterModel(BaseModel):
+        inner: InnerModel
+        x: int = 1
+
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            schema = handler(source_type)
+
+            def set_x(m: 'OuterModel') -> 'OuterModel':
+                m.x += 1
+                return m
+
+            return core_schema.no_info_after_validator_function(set_x, schema, ref=schema.pop('ref'))
+
+    cs = OuterModel.__pydantic_core_schema__
+    # super hacky check but it works in all cases and avoids a complex and fragile iteration over CoreSchema
+    # the point here is to verify that `__get_pydantic_core_schema__`
+    assert 'inner was here' in str(cs)
+
+    assert OuterModel(inner=InnerModel()).x == 2
+
+
+def test_resolve_def_schema_from_core_schema() -> None:
+    class Inner(BaseModel):
+        x: int
+
+    class Marker:
+        def __get_pydantic_core_schema__(self, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+            schema = handler(source_type)
+            resolved = handler.resolve_ref_schema(schema)
+            assert resolved['type'] == 'model'
+            assert resolved['cls'] is Inner
+
+            def modify_inner(v: Inner) -> Inner:
+                v.x += 1
+                return v
+
+            return core_schema.no_info_after_validator_function(modify_inner, schema)
+
+    class Outer(BaseModel):
+        inner: Annotated[Inner, Marker()]
+
+    assert Outer.model_validate({'inner': {'x': 1}}).inner.x == 2
+
+
+def test_extra_validator_scalar() -> None:
+    class Model(BaseModel):
+        model_config = ConfigDict(extra='allow')
+
+    class Child(Model):
+        __pydantic_extra__: Dict[str, int]
+
+    m = Child(a='1')
+    assert m.__pydantic_extra__ == {'a': 1}
+
+    # insert_assert(Child.model_json_schema())
+    assert Child.model_json_schema() == {
+        'additionalProperties': {'type': 'integer'},
+        'properties': {},
+        'title': 'Child',
+        'type': 'object',
+    }
+
+
+def test_extra_validator_named() -> None:
+    class Foo(BaseModel):
+        x: int
+
+    class Model(BaseModel):
+        model_config = ConfigDict(extra='allow')
+
+    class Child(Model):
+        __pydantic_extra__: Dict[str, Foo]
+
+    m = Child(a={'x': '1'})
+    assert m.__pydantic_extra__ == {'a': Foo(x=1)}
+
+    # insert_assert(Child.model_json_schema())
+    assert Child.model_json_schema() == {
+        '$defs': {
+            'Foo': {
+                'properties': {'x': {'title': 'X', 'type': 'integer'}},
+                'required': ['x'],
+                'title': 'Foo',
+                'type': 'object',
+            }
+        },
+        'additionalProperties': {'$ref': '#/$defs/Foo'},
+        'properties': {},
+        'title': 'Child',
+        'type': 'object',
+    }
+
+
+def test_super_getattr_extra():
+    class Model(BaseModel):
+        model_config = {'extra': 'allow'}
+
+        def __getattr__(self, item):
+            if item == 'test':
+                return 'success'
+            return super().__getattr__(item)
+
+    m = Model(x=1)
+    assert m.x == 1
+    with pytest.raises(AttributeError):
+        m.y
+    assert m.test == 'success'
+
+
+def test_super_getattr_private():
+    class Model(BaseModel):
+        _x: int = PrivateAttr()
+
+        def __getattr__(self, item):
+            if item == 'test':
+                return 'success'
+            else:
+                return super().__getattr__(item)
+
+    m = Model()
+    m._x = 1
+    assert m._x == 1
+    with pytest.raises(AttributeError):
+        m._y
+    assert m.test == 'success'
+
+
+def test_super_delattr_extra():
+    test_calls = []
+
+    class Model(BaseModel):
+        model_config = {'extra': 'allow'}
+
+        def __delattr__(self, item):
+            if item == 'test':
+                test_calls.append('success')
+            else:
+                super().__delattr__(item)
+
+    m = Model(x=1)
+    assert m.x == 1
+    del m.x
+    with pytest.raises(AttributeError):
+        m._x
+    assert test_calls == []
+    del m.test
+    assert test_calls == ['success']
+
+
+def test_super_delattr_private():
+    test_calls = []
+
+    class Model(BaseModel):
+        _x: int = PrivateAttr()
+
+        def __delattr__(self, item):
+            if item == 'test':
+                test_calls.append('success')
+            else:
+                super().__delattr__(item)
+
+    m = Model()
+    m._x = 1
+    assert m._x == 1
+    del m._x
+    with pytest.raises(AttributeError):
+        m._x
+    assert test_calls == []
+    del m.test
+    assert test_calls == ['success']

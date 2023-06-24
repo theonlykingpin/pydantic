@@ -10,8 +10,8 @@
 
 Data validation using Python type hints.
 
-Fast and extensible, *pydantic* plays nicely with your linters/IDE/brain.
-Define how data should be in pure, canonical Python 3.7+; validate it with *pydantic*.
+Fast and extensible, Pydantic plays nicely with your linters/IDE/brain.
+Define how data should be in pure, canonical Python 3.7+; validate it with Pydantic.
 
 ## Pydantic Company :rocket:
 
@@ -20,11 +20,11 @@ Learning more from the [Company Announcement](https://pydantic.dev/announcement/
 
 ## Pydantic V1.10 vs. V2
 
-This branch relates to development of pydantic V2 which is not yet ready for production use.
+Pydantic V2 is a ground-up rewrite that offers many new features, performance improvements, and some breaking changes compared to Pydantic V1.
 
-If you're a Pydantic user, you probably want either
+If you're using Pydantic V1 you may want to look at the
 [pydantic V1.10 Documentation](https://docs.pydantic.dev/) or,
-[`1.10.X-fixes` git branch](https://github.com/pydantic/pydantic/tree/1.10.X-fixes).
+[`1.10.X-fixes` git branch](https://github.com/pydantic/pydantic/tree/1.10.X-fixes). Pydantic V2 also ships with the latest version of Pydantic V1 built in so that you can incrementally upgrade your code base and projects: `from pydantic import v1 as pydantic_v1`.
 
 ## Help
 
@@ -33,7 +33,7 @@ See [documentation](https://docs.pydantic.dev/) for more details.
 ## Installation
 
 Install using `pip install -U pydantic` or `conda install pydantic -c conda-forge`.
-For more installation options to make *pydantic* even faster,
+For more installation options to make Pydantic even faster,
 see the [Install](https://docs.pydantic.dev/install/) section in the documentation.
 
 ## A Simple Example
@@ -60,7 +60,7 @@ print(user.id)
 ## Contributing
 
 For guidance on setting up a development environment and how to make a
-contribution to *pydantic*, see
+contribution to Pydantic, see
 [Contributing to Pydantic](https://docs.pydantic.dev/contributing/).
 
 ## Reporting a Security Vulnerability

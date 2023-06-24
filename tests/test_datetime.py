@@ -5,7 +5,17 @@ import pytest
 from dirty_equals import HasRepr
 from typing_extensions import Annotated
 
-from pydantic import AwareDatetime, BaseModel, FutureDate, NaiveDatetime, PastDate, ValidationError, condate
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    FutureDate,
+    FutureDatetime,
+    NaiveDatetime,
+    PastDate,
+    PastDatetime,
+    ValidationError,
+    condate,
+)
 
 from .conftest import Err
 
@@ -21,6 +31,16 @@ def future_date_type(request):
 
 @pytest.fixture(scope='module', params=[PastDate, Annotated[date, PastDate()]])
 def past_date_type(request):
+    return request.param
+
+
+@pytest.fixture(scope='module', params=[FutureDatetime, Annotated[datetime, FutureDatetime()]])
+def future_datetime_type(request):
+    return request.param
+
+
+@pytest.fixture(scope='module', params=[PastDatetime, Annotated[datetime, PastDatetime()]])
+def past_datetime_type(request):
     return request.param
 
 
@@ -106,15 +126,15 @@ def time_model_fixture():
         ('091500', Err('Input should be in a valid time format, invalid time separator, expected `:`')),
         (b'091500', Err('Input should be in a valid time format, invalid time separator, expected `:`')),
         ('09:15:90', Err('Input should be in a valid time format, second value is outside expected range of 0-59')),
-        ('11:05:00Y', Err('Input should be in a valid time format, unexpected extra characters at the end of the inp')),
-        # # https://github.com/pydantic/speedate/issues/10
-        # ('11:05:00-05:30', time(11, 5, 0, tzinfo=create_tz(-330))),
-        # ('11:05:00-0530', time(11, 5, 0, tzinfo=create_tz(-330))),
-        # ('11:05:00Z', time(11, 5, 0, tzinfo=timezone.utc)),
-        # ('11:05:00+00', time(11, 5, 0, tzinfo=timezone.utc)),
-        # ('11:05-06', time(11, 5, 0, tzinfo=create_tz(-360))),
-        # ('11:05+06', time(11, 5, 0, tzinfo=create_tz(360))),
-        # ('11:05:00-25:00', errors.TimeError),
+        ('11:05:00Y', Err('Input should be in a valid time format, invalid timezone sign')),
+        # https://github.com/pydantic/speedate/issues/10
+        ('11:05:00-05:30', time(11, 5, 0, tzinfo=create_tz(-330))),
+        ('11:05:00-0530', time(11, 5, 0, tzinfo=create_tz(-330))),
+        ('11:05:00Z', time(11, 5, 0, tzinfo=timezone.utc)),
+        ('11:05:00+00:00', time(11, 5, 0, tzinfo=timezone.utc)),
+        ('11:05-06:00', time(11, 5, 0, tzinfo=create_tz(-360))),
+        ('11:05+06:00', time(11, 5, 0, tzinfo=create_tz(360))),
+        ('11:05:00-25:00', Err('Input should be in a valid time format, timezone offset must be less than 24 hours')),
     ],
 )
 def test_time_parsing(TimeModel, value, result):
@@ -150,12 +170,13 @@ def datetime_model_fixture():
         (b'2012-04-23T10:20:30.400-02:00', datetime(2012, 4, 23, 10, 20, 30, 400_000, create_tz(-120))),
         (datetime(2017, 5, 5), datetime(2017, 5, 5)),
         (0, datetime(1970, 1, 1, 0, 0, 0)),
-        # # Invalid inputs
-        ('1494012444.883309', Err('Input should be a valid datetime, invalid date separator')),
-        ('1494012444', Err('Input should be a valid datetime, invalid date separator')),
-        (b'1494012444', Err('Input should be a valid datetime, invalid date separator')),
-        ('1494012444000.883309', Err('Input should be a valid datetime, invalid date separator')),
-        ('-1494012444000.883309', Err('Input should be a valid datetime, invalid character in year')),
+        # Numeric inputs as strings
+        ('1494012444.883309', datetime(2017, 5, 5, 19, 27, 24, 883309)),
+        ('1494012444', datetime(2017, 5, 5, 19, 27, 24)),
+        (b'1494012444', datetime(2017, 5, 5, 19, 27, 24)),
+        ('1494012444000.883309', datetime(2017, 5, 5, 19, 27, 24, 883301)),
+        ('-1494012444000.883309', datetime(1922, 8, 29, 4, 32, 35, 999000)),
+        # Invalid inputs
         ('2012-4-9 4:8:16', Err('Input should be a valid datetime, invalid character in month')),
         ('x20120423091500', Err('Input should be a valid datetime, invalid character in year')),
         ('2012-04-56T09:15:90', Err('Input should be a valid datetime, day value is outside expected range')),
@@ -201,9 +222,9 @@ def test_aware_datetime_validation_fails(aware_datetime_type):
 
     assert exc_info.value.errors(include_url=False) == [
         {
-            'type': 'datetime_aware',
+            'type': 'timezone_aware',
             'loc': ('foo',),
-            'msg': 'Datetime should have timezone info',
+            'msg': 'Input should have timezone info',
             'input': value,
         }
     ]
@@ -229,9 +250,9 @@ def test_naive_datetime_validation_fails(naive_datetime_type):
 
     assert exc_info.value.errors(include_url=False) == [
         {
-            'type': 'datetime_naive',
+            'type': 'timezone_naive',
             'loc': ('foo',),
-            'msg': 'Datetime should not have timezone info',
+            'msg': 'Input should not have timezone info',
             'input': value,
         }
     ]
@@ -486,3 +507,91 @@ def test_future_date_validation_fails(value, future_date_type):
             'input': value,
         }
     ]
+
+
+@pytest.mark.parametrize(
+    'value,result',
+    (
+        ('1996-01-22T10:20:30', datetime(1996, 1, 22, 10, 20, 30)),
+        (datetime(1996, 1, 22, 10, 20, 30), datetime(1996, 1, 22, 10, 20, 30)),
+    ),
+)
+def test_past_datetime_validation_success(value, result, past_datetime_type):
+    class Model(BaseModel):
+        foo: past_datetime_type
+
+    assert Model(foo=value).foo == result
+
+
+@pytest.mark.parametrize(
+    'value',
+    (
+        datetime.now() + timedelta(1),
+        '2064-06-01T10:20:30',
+    ),
+)
+def test_past_datetime_validation_fails(value, past_datetime_type):
+    class Model(BaseModel):
+        foo: past_datetime_type
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(foo=value)
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'type': 'datetime_past',
+            'loc': ('foo',),
+            'msg': 'Input should be in the past',
+            'input': value,
+        }
+    ]
+
+
+def test_future_datetime_validation_success(future_datetime_type):
+    class Model(BaseModel):
+        foo: future_datetime_type
+
+    d = datetime.now() + timedelta(1)
+    assert Model(foo=d).foo == d
+    assert Model(foo='2064-06-01T10:20:30').foo == datetime(2064, 6, 1, 10, 20, 30)
+
+
+@pytest.mark.parametrize(
+    'value',
+    (
+        datetime.now(),
+        datetime.now() - timedelta(1),
+        '1996-01-22T10:20:30',
+    ),
+)
+def test_future_datetime_validation_fails(value, future_datetime_type):
+    class Model(BaseModel):
+        foo: future_datetime_type
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(foo=value)
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'type': 'datetime_future',
+            'loc': ('foo',),
+            'msg': 'Input should be in the future',
+            'input': value,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    'annotation',
+    (
+        PastDate,
+        PastDatetime,
+        FutureDate,
+        FutureDatetime,
+        NaiveDatetime,
+        AwareDatetime,
+    ),
+)
+def test_invalid_annotated_type(annotation):
+    with pytest.raises(TypeError, match=f"'{annotation.__name__}' cannot annotate 'str'."):
+
+        class Model(BaseModel):
+            foo: Annotated[str, annotation()]

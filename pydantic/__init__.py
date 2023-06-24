@@ -1,4 +1,6 @@
-from pydantic_core import ValidationError
+import typing
+
+import pydantic_core
 from pydantic_core.core_schema import (
     FieldSerializationInfo,
     FieldValidationInfo,
@@ -9,6 +11,12 @@ from pydantic_core.core_schema import (
 )
 
 from . import dataclasses
+from ._internal._annotated_handlers import (
+    GetCoreSchemaHandler as GetCoreSchemaHandler,
+)
+from ._internal._annotated_handlers import (
+    GetJsonSchemaHandler as GetJsonSchemaHandler,
+)
 from ._migration import getattr_migration
 from .config import ConfigDict, Extra
 from .deprecated.class_validators import root_validator, validator
@@ -16,8 +24,18 @@ from .deprecated.config import BaseConfig  # type: ignore
 from .deprecated.tools import *
 from .errors import *
 from .fields import AliasChoices, AliasPath, Field, PrivateAttr, computed_field
-from .functional_serializers import field_serializer, model_serializer
-from .functional_validators import field_validator, model_validator
+from .functional_serializers import PlainSerializer, SerializeAsAny, WrapSerializer, field_serializer, model_serializer
+from .functional_validators import (
+    AfterValidator,
+    BeforeValidator,
+    InstanceOf,
+    PlainValidator,
+    SkipValidation,
+    WrapValidator,
+    field_validator,
+    model_validator,
+)
+from .json_schema import WithJsonSchema
 from .main import *
 from .networks import *
 from .type_adapter import TypeAdapter
@@ -26,6 +44,9 @@ from .validate_call import validate_call
 from .version import VERSION
 
 __version__ = VERSION
+
+# this encourages pycharm to import `ValidationError` from here, not pydantic_core
+ValidationError = pydantic_core.ValidationError
 
 # WARNING __all__ from .errors is not included here, it will be removed as an export here in v2
 # please use "from pydantic.errors import ..." instead
@@ -38,12 +59,19 @@ __all__ = [
     'ValidatorFunctionWrapHandler',
     'field_validator',
     'model_validator',
+    'AfterValidator',
+    'BeforeValidator',
+    'PlainValidator',
+    'WrapValidator',
     # deprecated V1 functional validators
     'root_validator',
     'validator',
     # functional serializers
     'field_serializer',
     'model_serializer',
+    'PlainSerializer',
+    'SerializeAsAny',
+    'WrapSerializer',
     'FieldSerializationInfo',
     'SerializationInfo',
     'SerializerFunctionWrapHandler',
@@ -53,12 +81,15 @@ __all__ = [
     'Extra',
     # validate_call
     'validate_call',
-    # error_wrappers
+    # pydantic_core errors
     'ValidationError',
+    # errors
+    'PydanticErrorCodes',
     'PydanticUserError',
     'PydanticSchemaGenerationError',
     'PydanticImportError',
     'PydanticUndefinedAnnotation',
+    'PydanticInvalidForJsonSchema',
     # fields
     'AliasPath',
     'AliasChoices',
@@ -87,6 +118,8 @@ __all__ = [
     'MySQLDsn',
     'MariaDBDsn',
     'validate_email',
+    # root_model
+    'RootModel',
     # tools
     'parse_obj_as',
     'schema_of',
@@ -121,7 +154,6 @@ __all__ = [
     'DirectoryPath',
     'NewPath',
     'Json',
-    'SecretField',
     'SecretStr',
     'SecretBytes',
     'StrictBool',
@@ -133,6 +165,8 @@ __all__ = [
     'ByteSize',
     'PastDate',
     'FutureDate',
+    'PastDatetime',
+    'FutureDatetime',
     'AwareDatetime',
     'NaiveDatetime',
     'AllowInfNan',
@@ -142,11 +176,32 @@ __all__ = [
     'Base64Encoder',
     'Base64Bytes',
     'Base64Str',
+    'SkipValidation',
+    'InstanceOf',
+    'WithJsonSchema',
     # type_adapter
     'TypeAdapter',
     # version
     'VERSION',
+    # annotated handlers
+    'GetCoreSchemaHandler',
+    'GetJsonSchemaHandler',
 ]
 
+# A mapping of {<member name>: <module name>} defining dynamic imports
+_dynamic_imports = {'RootModel': '.root_model'}
+if typing.TYPE_CHECKING:
+    from .root_model import RootModel
 
-__getattr__ = getattr_migration(__name__)
+_getattr_migration = getattr_migration(__name__)
+
+
+def __getattr__(attr_name: str) -> object:
+    dynamic_attr = _dynamic_imports.get(attr_name)
+    if dynamic_attr is None:
+        return _getattr_migration(attr_name)
+
+    from importlib import import_module
+
+    module = import_module(_dynamic_imports[attr_name], package=__package__)
+    return getattr(module, attr_name)

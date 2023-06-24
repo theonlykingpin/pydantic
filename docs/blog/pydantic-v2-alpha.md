@@ -133,7 +133,7 @@ a full migration guide, but for now the following pointers should be some help w
 
 The following config settings have been removed:
 
-* `allow_mutation`.
+* `allow_mutation` — this has been removed. You should be able to use [frozen](../api/config.md#pydantic.config.ConfigDict) equivalently (inverse of current use).
 * `error_msg_templates`.
 * `fields` — this was the source of various bugs, so has been removed. You should be able to use `Annotated` on fields to modify them as desired.
 * `getter_dict` — `orm_mode` has been removed, and this implementation detail is no longer necessary.
@@ -194,7 +194,7 @@ from pydantic import TypeAdapter
 validator = TypeAdapter(List[int])
 assert validator.validate_python(['1', '2', '3']) == [1, 2, 3]
 print(validator.json_schema())
-#> {'type': 'array', 'items': {'type': 'integer'}}
+#> {'items': {'type': 'integer'}, 'type': 'array'}
 ```
 
 Note that this API is provisional and may change before the final release of Pydantic V2.

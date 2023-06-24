@@ -1,22 +1,24 @@
-from __future__ import annotations as _annotations
-
 import random
 import sys
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar, List, Tuple
 
 import pytest
-from pydantic_core import PydanticSerializationError, ValidationError
+from pydantic_core import ValidationError, core_schema
+from typing_extensions import TypedDict
 
 from pydantic import (
     BaseModel,
     Field,
+    GetCoreSchemaHandler,
     PrivateAttr,
     TypeAdapter,
     computed_field,
     dataclasses,
     field_validator,
 )
+from pydantic.alias_generators import to_camel
+from pydantic.errors import PydanticUserError
 
 try:
     from functools import cached_property, lru_cache, singledispatchmethod
@@ -264,11 +266,11 @@ def test_include_exclude():
         y: int
 
         @computed_field
-        def x_list(self) -> list[int]:
+        def x_list(self) -> List[int]:
             return [self.x, self.x + 1]
 
         @computed_field
-        def y_list(self) -> list[int]:
+        def y_list(self) -> List[int]:
             return [self.y, self.y + 1, self.y + 2]
 
     m = Model(x=1, y=2)
@@ -283,11 +285,11 @@ def test_expected_type():
         x: int
         y: int
 
-        @computed_field(json_return_type='list')
-        def x_list(self) -> list[int]:
+        @computed_field
+        def x_list(self) -> List[int]:
             return [self.x, self.x + 1]
 
-        @computed_field(json_return_type='bytes')
+        @computed_field
         def y_str(self) -> bytes:
             s = f'y={self.y}'
             return s.encode()
@@ -302,16 +304,16 @@ def test_expected_type_wrong():
     class Model(BaseModel):
         x: int
 
-        @computed_field(json_return_type='list')
-        def x_list(self) -> list[int]:
+        @computed_field
+        def x_list(self) -> List[int]:
             return 'not a list'
 
     m = Model(x=1)
-    with pytest.raises(TypeError, match="^'str' object cannot be converted to 'PyList'$"):
+    with pytest.warns(UserWarning, match=r'Expected `list\[int\]` but got `str`'):
         m.model_dump()
-    with pytest.raises(TypeError, match="^'str' object cannot be converted to 'PyList'$"):
+    with pytest.warns(UserWarning, match=r'Expected `list\[int\]` but got `str`'):
         m.model_dump(mode='json')
-    with pytest.raises(PydanticSerializationError, match="Error serializing to JSON: 'str' object cannot be converted"):
+    with pytest.warns(UserWarning, match=r'Expected `list\[int\]` but got `str`'):
         m.model_dump_json()
 
 
@@ -483,7 +485,7 @@ def test_abstractmethod():
         (BaseModel,),
     ],
 )
-def test_abstractmethod_missing(bases: tuple[Any, ...]):
+def test_abstractmethod_missing(bases: Tuple[Any, ...]):
     class AbstractSquare(*bases):
         side: float
 
@@ -498,3 +500,188 @@ def test_abstractmethod_missing(bases: tuple[Any, ...]):
 
     with pytest.raises(TypeError, match="Can't instantiate abstract class Square with abstract methods? area"):
         Square(side=4.0)
+
+
+class CustomType(str):
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source: Any, handler: GetCoreSchemaHandler) -> core_schema.CoreSchema:
+        schema = handler(str)
+        schema['serialization'] = core_schema.plain_serializer_function_ser_schema(lambda x: '123')
+        return schema
+
+
+def test_computed_fields_infer_return_type():
+    class Model(BaseModel):
+        @computed_field
+        def cfield(self) -> CustomType:
+            return CustomType('abc')
+
+    assert Model().model_dump() == {'cfield': '123'}
+    assert Model().model_dump_json() == '{"cfield":"123"}'
+
+
+def test_computed_fields_missing_return_type():
+    with pytest.raises(PydanticUserError, match='Computed field is missing return type annotation'):
+
+        class _Model(BaseModel):
+            @computed_field
+            def cfield(self):
+                raise NotImplementedError
+
+    class Model(BaseModel):
+        @computed_field(return_type=CustomType)
+        def cfield(self):
+            return CustomType('abc')
+
+    assert Model().model_dump() == {'cfield': '123'}
+    assert Model().model_dump_json() == '{"cfield":"123"}'
+
+
+def test_alias_generator():
+    class MyModel(BaseModel):
+        my_standard_field: int
+
+        @computed_field  # *will* be overridden by alias generator
+        @property
+        def my_computed_field(self) -> int:
+            return self.my_standard_field + 1
+
+        @computed_field(alias='my_alias_none')  # will *not* be overridden by alias generator
+        @property
+        def my_aliased_computed_field_none(self) -> int:
+            return self.my_standard_field + 2
+
+        @computed_field(alias='my_alias_1', alias_priority=1)  # *will* be overridden by alias generator
+        @property
+        def my_aliased_computed_field_1(self) -> int:
+            return self.my_standard_field + 3
+
+        @computed_field(alias='my_alias_2', alias_priority=2)  # will *not* be overridden by alias generator
+        @property
+        def my_aliased_computed_field_2(self) -> int:
+            return self.my_standard_field + 4
+
+    class MySubModel(MyModel):
+        model_config = dict(alias_generator=to_camel, populate_by_name=True)
+
+    model = MyModel(my_standard_field=1)
+    assert model.model_dump() == {
+        'my_standard_field': 1,
+        'my_computed_field': 2,
+        'my_aliased_computed_field_none': 3,
+        'my_aliased_computed_field_1': 4,
+        'my_aliased_computed_field_2': 5,
+    }
+    assert model.model_dump(by_alias=True) == {
+        'my_standard_field': 1,
+        'my_computed_field': 2,
+        'my_alias_none': 3,
+        'my_alias_1': 4,
+        'my_alias_2': 5,
+    }
+
+    submodel = MySubModel(my_standard_field=1)
+    assert submodel.model_dump() == {
+        'my_standard_field': 1,
+        'my_computed_field': 2,
+        'my_aliased_computed_field_none': 3,
+        'my_aliased_computed_field_1': 4,
+        'my_aliased_computed_field_2': 5,
+    }
+    assert submodel.model_dump(by_alias=True) == {
+        'myStandardField': 1,
+        'myComputedField': 2,
+        'my_alias_none': 3,
+        'myAliasedComputedField1': 4,
+        'my_alias_2': 5,
+    }
+
+
+def make_base_model() -> Any:
+    class CompModel(BaseModel):
+        pass
+
+    class Model(BaseModel):
+        @computed_field
+        @property
+        def comp_1(self) -> CompModel:
+            return CompModel()
+
+        @computed_field
+        @property
+        def comp_2(self) -> CompModel:
+            return CompModel()
+
+    return Model
+
+
+def make_dataclass() -> Any:
+    class CompModel(BaseModel):
+        pass
+
+    @dataclasses.dataclass
+    class Model:
+        @computed_field
+        @property
+        def comp_1(self) -> CompModel:
+            return CompModel()
+
+        @computed_field
+        @property
+        def comp_2(self) -> CompModel:
+            return CompModel()
+
+    return Model
+
+
+def make_typed_dict() -> Any:
+    class CompModel(BaseModel):
+        pass
+
+    class Model(TypedDict):
+        @computed_field  # type: ignore
+        @property
+        def comp_1(self) -> CompModel:
+            return CompModel()
+
+        @computed_field  # type: ignore
+        @property
+        def comp_2(self) -> CompModel:
+            return CompModel()
+
+    return Model
+
+
+@pytest.mark.parametrize(
+    'model_factory',
+    [
+        make_base_model,
+        pytest.param(
+            make_typed_dict,
+            marks=pytest.mark.xfail(
+                reason='computed fields do not work with TypedDict yet. See https://github.com/pydantic/pydantic-core/issues/657'
+            ),
+        ),
+        make_dataclass,
+    ],
+)
+def test_multiple_references_to_schema(model_factory: Callable[[], Any]) -> None:
+    """
+    https://github.com/pydantic/pydantic/issues/5980
+    """
+
+    model = model_factory()
+
+    ta = TypeAdapter(model)
+
+    assert ta.dump_python(model()) == {'comp_1': {}, 'comp_2': {}}
+
+    assert ta.json_schema() == {'type': 'object', 'properties': {}, 'title': 'Model'}
+
+    assert ta.json_schema(mode='serialization') == {
+        'type': 'object',
+        'properties': {'comp_1': {'$ref': '#/$defs/CompModel'}, 'comp_2': {'$ref': '#/$defs/CompModel'}},
+        'required': ['comp_1', 'comp_2'],
+        'title': 'Model',
+        '$defs': {'CompModel': {'type': 'object', 'properties': {}, 'title': 'CompModel'}},
+    }

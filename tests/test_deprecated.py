@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Type
 import pytest
 from typing_extensions import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PydanticUserError, ValidationError, root_validator
+from pydantic import BaseModel, ConfigDict, Field, PydanticUserError, ValidationError, conlist, root_validator
 from pydantic.config import Extra
 from pydantic.deprecated.decorator import validate_arguments
 from pydantic.deprecated.json import custom_pydantic_encoder, pydantic_encoder, timedelta_isoformat
@@ -32,49 +32,6 @@ def deprecated_from_orm(model_type: Type[BaseModel], obj: Any) -> Any:
         ),
     ):
         return model_type.from_orm(obj)
-
-
-@pytest.mark.xfail(reason='working on V2')
-def test_getdict():
-    class TestCls:
-        a = 1
-        b: int
-
-        def __init__(self):
-            self.c = 3
-
-        @property
-        def d(self):
-            return 4
-
-        def __getattr__(self, key):
-            if key == 'e':
-                return 5
-            else:
-                raise AttributeError()
-
-    t = TestCls()
-    # gd = GetterDict(t)
-    gd = object(t)
-    assert gd.keys() == ['a', 'c', 'd']
-    assert gd.get('a') == 1
-    assert gd['a'] == 1
-    with pytest.raises(KeyError):
-        assert gd['foobar']
-    assert gd.get('b', None) is None
-    assert gd.get('b', 1234) == 1234
-    assert gd.get('c', None) == 3
-    assert gd.get('d', None) == 4
-    assert gd.get('e', None) == 5
-    assert gd.get('f', 'missing') == 'missing'
-    assert list(gd.values()) == [1, 3, 4]
-    assert list(gd.items()) == [('a', 1), ('c', 3), ('d', 4)]
-    assert list(gd) == ['a', 'c', 'd']
-    assert gd == {'a': 1, 'c': 3, 'd': 4}
-    assert 'a' in gd
-    assert len(gd) == 3
-    assert str(gd) == "{'a': 1, 'c': 3, 'd': 4}"
-    assert repr(gd) == "GetterDict[TestCls]({'a': 1, 'c': 3, 'd': 4})"
 
 
 def test_from_attributes_root():
@@ -256,7 +213,7 @@ def test_extra_allow_from_orm(extra: Literal['ignore', 'forbid', 'allow']):
     assert not hasattr(model, 'y')
 
 
-@pytest.mark.xfail(reason='working on V2')
+@pytest.mark.filterwarnings('ignore:Pydantic V1 style `@root_validator` validators are deprecated.*:DeprecationWarning')
 def test_root_validator():
     validator_value = None
 
@@ -274,69 +231,12 @@ def test_root_validator():
         def change_input_data(cls, value):
             nonlocal validator_value
             validator_value = value
-            return {**value, 'z': value['x'] + value['y']}
+            return {'x': value.x, 'y': value.y, 'z': value.x + value.y}
 
     model = deprecated_from_orm(Model, TestCls())
     assert model.model_dump() == {'x': 1, 'y': 2, 'z': 3}
     # assert isinstance(validator_value, GetterDict)
-    assert validator_value == {'x': 1, 'y': 2}
-
-
-@pytest.mark.xfail(reason='working on V2')
-def test_custom_getter_dict():
-    class TestCls:
-        x = 1
-        y = 2
-
-    def custom_getter_dict(obj):
-        assert isinstance(obj, TestCls)
-        return {'x': 42, 'y': 24}
-
-    class Model(BaseModel):
-        x: int
-        y: int
-
-        class Config:
-            from_attributes = True
-            getter_dict = custom_getter_dict
-
-    model = deprecated_from_orm(Model, TestCls())
-    assert model.model_dump() == {'x': 42, 'y': 24}
-
-
-@pytest.mark.xfail(reason='working on V2')
-def test_recursive_parsing():
-    class Getter:  # GetterDict
-        # try to read the modified property name
-        # either as an attribute or as a key
-        def get(self, key, default):
-            key = key + key
-            try:
-                v = self._obj[key]
-                return Getter(v) if isinstance(v, dict) else v
-            except TypeError:
-                return getattr(self._obj, key, default)
-            except KeyError:
-                return default
-
-    class Model(BaseModel):
-        class Config:
-            from_attributes = True
-            getter_dict = Getter
-
-    class ModelA(Model):
-        a: int
-
-    class ModelB(Model):
-        b: ModelA
-
-    # test recursive parsing with object attributes
-    dct = dict(bb=SimpleNamespace(aa=1))
-    assert deprecated_from_orm(ModelB, dct) == ModelB(b=ModelA(a=1))
-
-    # test recursive parsing with dict keys
-    obj = dict(bb=dict(aa=1))
-    assert deprecated_from_orm(ModelB, obj) == ModelB(b=ModelA(a=1))
+    assert isinstance(validator_value, TestCls)
 
 
 def test_nested_orm():
@@ -387,6 +287,21 @@ def test_parse_raw_pass_fail():
     ]
 
 
+def test_fields():
+    class Model(BaseModel):
+        x: int
+        y: int = 2
+
+    m = Model(x=1)
+    assert len(Model.model_fields) == 2
+    assert len(m.model_fields) == 2
+    match = '^The `__fields__` attribute is deprecated, use `model_fields` instead.$'
+    with pytest.warns(DeprecationWarning, match=match):
+        assert len(Model.__fields__) == 2
+    with pytest.warns(DeprecationWarning, match=match):
+        assert len(m.__fields__) == 2
+
+
 def test_fields_set():
     class Model(BaseModel):
         x: int
@@ -404,7 +319,7 @@ def test_extra_used_as_enum(
     attribute: str,
     value: str,
 ) -> None:
-    with pytest.raises(
+    with pytest.warns(
         DeprecationWarning,
         match=re.escape("`pydantic.config.Extra` is deprecated, use literal values instead (e.g. `extra='allow'`)"),
     ):
@@ -505,6 +420,13 @@ def test_unique_items_items():
             x: List[int] = Field(None, unique_items=True)
 
 
+def test_unique_items_conlist():
+    with pytest.raises(PydanticUserError, match='`unique_items` is removed. use `Set` instead'):
+
+        class Model(BaseModel):
+            x: conlist(int, unique_items=True)
+
+
 def test_allow_mutation():
     m = '`allow_mutation` is deprecated and will be removed. use `frozen` instead'
     with pytest.warns(DeprecationWarning, match=m):
@@ -512,8 +434,10 @@ def test_allow_mutation():
         class Model(BaseModel):
             model_config = ConfigDict(validate_assignment=True)
             x: int = Field(allow_mutation=False)
+            y: int = Field(allow_mutation=True)
 
-    m = Model(x=1)
+    m = Model(x=1, y=2)
+
     assert m.x == 1
     with pytest.raises(ValidationError) as exc_info:
         m.x = 2
@@ -521,12 +445,29 @@ def test_allow_mutation():
         {'input': 2, 'loc': ('x',), 'msg': 'Field is frozen', 'type': 'frozen_field'}
     ]
 
+    m.y = 3
+    assert m.y == 3
+
 
 def test_field_regex():
-    with pytest.raises(PydanticUserError, match='`regex` is removed. use `Pattern` instead'):
+    with pytest.raises(PydanticUserError, match='`regex` is removed. use `pattern` instead'):
 
         class Model(BaseModel):
             x: str = Field('test', regex=r'^test$')
+
+
+def test_modify_schema_error():
+    with pytest.raises(
+        PydanticUserError,
+        match='The `__modify_schema__` method is not supported in Pydantic v2. '
+        'Use `__get_pydantic_json_schema__` instead.',
+    ):
+
+        class Model(BaseModel):
+            def __modify_schema__(self, field_schema: Dict[str, Any]) -> None:
+                pass
+
+        Model()
 
 
 def test_field_extra_arguments():
@@ -538,6 +479,18 @@ def test_field_extra_arguments():
 
     assert Model.model_json_schema(by_alias=True)['properties'] == {
         'x': {'default': 'test', 'test': 'test', 'title': 'X', 'type': 'string'}
+    }
+
+
+def test_field_extra_does_not_rewrite_json_schema_extra():
+    m = 'Extra keyword arguments on `Field` is deprecated and will be removed. use `json_schema_extra` instead'
+    with pytest.warns(DeprecationWarning, match=m):
+
+        class Model(BaseModel):
+            x: str = Field('test', test='test', json_schema_extra={'test': 'json_schema_extra value'})
+
+    assert Model.model_json_schema(by_alias=True)['properties'] == {
+        'x': {'default': 'test', 'test': 'json_schema_extra value', 'title': 'X', 'type': 'string'}
     }
 
 
@@ -688,3 +641,20 @@ def test_deprecated_module(tmp_path: Path) -> None:
             pass
 
         validate_arguments()(test)
+
+
+def test_deprecated_color():
+    from pydantic.color import Color
+
+    with pytest.warns(DeprecationWarning, match='The `Color` class is deprecated, use `pydantic_extra_types` instead.'):
+        Color('red')
+
+
+def test_deprecated_payment():
+    from pydantic import PaymentCardNumber
+
+    with pytest.warns(
+        DeprecationWarning,
+        match='The `PaymentCardNumber` class is deprecated, use `pydantic_extra_types` instead.',
+    ):
+        PaymentCardNumber('4242424242424242')

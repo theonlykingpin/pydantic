@@ -8,6 +8,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import Any
 
 import pytest
 from pytest_examples import CodeExample, EvalExample, find_examples
@@ -16,6 +17,7 @@ from pydantic.errors import PydanticErrorCodes
 
 INDEX_MAIN = None
 DOCS_ROOT = Path(__file__).parent.parent / 'docs'
+SOURCES_ROOT = Path(__file__).parent.parent / 'pydantic'
 
 
 def skip_docs_tests():
@@ -74,28 +76,16 @@ def print_callback(print_statement: str) -> str:
     return re.sub(r'(https://errors.pydantic.dev)/.+?/', r'\1/2/', print_statement)
 
 
-@pytest.mark.filterwarnings('ignore:(parse_obj_as|schema_json_of|schema_of) is deprecated.*:DeprecationWarning')
-@pytest.mark.skipif(bool(skip_reason), reason=skip_reason or 'not skipping')
-@pytest.mark.parametrize('example', find_examples(str(DOCS_ROOT), skip=sys.platform == 'win32'), ids=str)
-def test_docs_examples(example: CodeExample, eval_example: EvalExample, tmp_path: Path, mocker):  # noqa: C901
-    global INDEX_MAIN
-    if example.path.name == 'index.md':
-        if INDEX_MAIN is None:
-            INDEX_MAIN = example.source
-        else:
-            (tmp_path / 'index_main.py').write_text(INDEX_MAIN)
-            sys.path.append(str(tmp_path))
-
-    if example.path.name == 'devtools.md':
-        pytest.skip('tested below')
-
+def run_example(  # noqa C901
+    example: CodeExample, eval_example: EvalExample, mocker: Any, ruff_ignore: list[str] | None = None
+) -> None:
     eval_example.print_callback = print_callback
 
     prefix_settings = example.prefix_settings()
-    test_settings = prefix_settings.get('test')
-    lint_settings = prefix_settings.get('lint')
-    if test_settings == 'skip' and lint_settings == 'skip':
-        pytest.skip('both test and lint skipped')
+    test_settings = prefix_settings.get('test', '')
+    lint_settings = prefix_settings.get('lint', '')
+    if test_settings.startswith('skip') and lint_settings.startswith('skip'):
+        pytest.skip('both running code and lint skipped')
 
     requires_settings = prefix_settings.get('requires')
     if requires_settings:
@@ -105,19 +95,23 @@ def test_docs_examples(example: CodeExample, eval_example: EvalExample, tmp_path
 
     group_name = prefix_settings.get('group')
 
+    eval_example.set_config(ruff_ignore=['D'])
     if '# ignore-above' in example.source:
-        eval_example.set_config(ruff_ignore=['E402'])
+        eval_example.set_config(ruff_ignore=['D', 'E402'])
     if group_name:
-        eval_example.set_config(ruff_ignore=['F821'])
+        eval_example.set_config(ruff_ignore=['D', 'F821'])
 
-    if lint_settings != 'skip':
+    if not lint_settings.startswith('skip'):
         if eval_example.update_examples:
             eval_example.format(example)
         else:
+            if example.in_py_file():
+                # Ignore isort as double newlines will cause it to fail, but we remove them in py files
+                eval_example.set_config(ruff_ignore=eval_example.config.ruff_ignore + ['I001'])
             eval_example.lint(example)
 
-    if test_settings == 'skip':
-        return
+    if test_settings.startswith('skip'):
+        pytest.skip(test_settings[4:].lstrip(' -') or 'running code skipped')
 
     group_name = prefix_settings.get('group')
     d = group_globals.get(group_name)
@@ -126,7 +120,7 @@ def test_docs_examples(example: CodeExample, eval_example: EvalExample, tmp_path
     mocker.patch('random.randint', return_value=3)
 
     xfail = None
-    if test_settings and test_settings.startswith('xfail'):
+    if test_settings.startswith('xfail'):
         xfail = test_settings[5:].lstrip(' -')
 
     rewrite_assertions = prefix_settings.get('rewrite_assert', 'true') == 'true'
@@ -148,12 +142,42 @@ def test_docs_examples(example: CodeExample, eval_example: EvalExample, tmp_path
         group_globals.set(group_name, d2)
 
 
+@pytest.mark.filterwarnings('ignore:(parse_obj_as|schema_json_of|schema_of) is deprecated.*:DeprecationWarning')
+@pytest.mark.skipif(bool(skip_reason), reason=skip_reason or 'not skipping')
+@pytest.mark.parametrize('example', find_examples(str(SOURCES_ROOT), skip=sys.platform == 'win32'), ids=str)
+def test_docstrings_examples(example: CodeExample, eval_example: EvalExample, tmp_path: Path, mocker):
+    if str(example.path).startswith(str(SOURCES_ROOT / 'v1')):
+        pytest.skip('skip v1 examples')
+
+    run_example(example, eval_example, mocker, ruff_ignore=['I001'])
+
+
+@pytest.mark.filterwarnings('ignore:(parse_obj_as|schema_json_of|schema_of) is deprecated.*:DeprecationWarning')
+@pytest.mark.skipif(bool(skip_reason), reason=skip_reason or 'not skipping')
+@pytest.mark.parametrize('example', find_examples(str(DOCS_ROOT), skip=sys.platform == 'win32'), ids=str)
+def test_docs_examples(example: CodeExample, eval_example: EvalExample, tmp_path: Path, mocker):
+    global INDEX_MAIN
+    if example.path.name == 'index.md':
+        if INDEX_MAIN is None:
+            INDEX_MAIN = example.source
+        else:
+            (tmp_path / 'index_main.py').write_text(INDEX_MAIN)
+            sys.path.append(str(tmp_path))
+
+    if example.path.name == 'devtools.md':
+        pytest.skip('tested below')
+
+    run_example(example, eval_example, mocker)
+
+
 @pytest.mark.skipif(bool(skip_reason), reason=skip_reason or 'not skipping')
 @pytest.mark.parametrize(
     'example', find_examples(str(DOCS_ROOT / 'integrations/devtools.md'), skip=sys.platform == 'win32'), ids=str
 )
 def test_docs_devtools_example(example: CodeExample, eval_example: EvalExample, tmp_path: Path):
     from ansi2html import Ansi2HTMLConverter
+
+    eval_example.set_config(ruff_ignore=['D'])
 
     if eval_example.update_examples:
         eval_example.format(example)

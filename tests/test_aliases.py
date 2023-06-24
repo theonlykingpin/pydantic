@@ -217,9 +217,6 @@ def test_alias_generator_on_child():
 
 
 def test_low_priority_alias():
-    # TODO:
-    #  Alternative 1: we could drop alias_priority and tell people to manually override aliases in child classes
-    #  Alternative 2: we could add a new argument `override_with_alias_generator=True` equivalent to `alias_priority=1`
     class Parent(BaseModel):
         w: bool = Field(..., alias='w_', validation_alias='w_val_alias', serialization_alias='w_ser_alias')
         x: bool = Field(
@@ -239,6 +236,55 @@ def test_low_priority_alias():
     assert [f.alias for f in Child.model_fields.values()] == ['w_', 'X', 'Y', 'Z']
     assert [f.validation_alias for f in Child.model_fields.values()] == ['w_val_alias', 'X', 'Y', 'Z']
     assert [f.serialization_alias for f in Child.model_fields.values()] == ['w_ser_alias', 'X', 'Y', 'Z']
+
+
+@pytest.mark.parametrize(
+    'cls_params, field_params, validation_key, serialization_key',
+    [
+        pytest.param(
+            {},
+            {'alias': 'x1', 'validation_alias': 'x2'},
+            'x2',
+            'x1',
+            id='alias-validation_alias',
+        ),
+        pytest.param(
+            {'alias_generator': str.upper},
+            {'alias': 'x'},
+            'x',
+            'x',
+            id='alias_generator-alias',
+        ),
+        pytest.param(
+            {'alias_generator': str.upper},
+            {'alias': 'x1', 'validation_alias': 'x2'},
+            'x2',
+            'x1',
+            id='alias_generator-alias-validation_alias',
+        ),
+        pytest.param(
+            {'alias_generator': str.upper},
+            {'alias': 'x1', 'serialization_alias': 'x2'},
+            'x1',
+            'x2',
+            id='alias_generator-alias-serialization_alias',
+        ),
+        pytest.param(
+            {'alias_generator': str.upper},
+            {'alias': 'x1', 'validation_alias': 'x2', 'serialization_alias': 'x3'},
+            'x2',
+            'x3',
+            id='alias_generator-alias-validation_alias-serialization_alias',
+        ),
+    ],
+)
+def test_aliases_priority(cls_params, field_params, validation_key, serialization_key):
+    class Model(BaseModel, **cls_params):
+        x: int = Field(**field_params)
+
+    model = Model(**{validation_key: 1})
+    assert model.x == 1
+    assert model.model_dump(by_alias=True).get(serialization_key, None) is not None
 
 
 def test_empty_string_alias():
@@ -405,33 +451,56 @@ def test_serialization_alias_from_alias():
     assert 'foo' in sig.parameters
 
 
-def test_aliases_json_schema():
+@pytest.mark.parametrize(
+    'field,expected',
+    [
+        pytest.param(
+            Field(alias='x_alias', validation_alias='x_val_alias', serialization_alias='x_ser_alias'),
+            {
+                'properties': {'x_val_alias': {'title': 'X Val Alias', 'type': 'string'}},
+                'required': ['x_val_alias'],
+            },
+            id='single_alias',
+        ),
+        pytest.param(
+            Field(validation_alias=AliasChoices('y_alias', 'another_alias')),
+            {
+                'properties': {'y_alias': {'title': 'Y Alias', 'type': 'string'}},
+                'required': ['y_alias'],
+            },
+            id='multiple_aliases',
+        ),
+        pytest.param(
+            Field(validation_alias=AliasChoices(AliasPath('z_alias', 'even_another_alias'), 'and_another')),
+            {
+                'properties': {'and_another': {'title': 'And Another', 'type': 'string'}},
+                'required': ['and_another'],
+            },
+            id='multiple_aliases_with_path',
+        ),
+    ],
+)
+def test_aliases_json_schema(field, expected):
     class Model(BaseModel):
-        x: str = Field(alias='x_alias', validation_alias='x_val_alias', serialization_alias='x_ser_alias')
+        x: str = field
 
-    assert Model.model_json_schema() == {
-        'properties': {'x_val_alias': {'title': 'X Val Alias', 'type': 'string'}},
-        'required': ['x_val_alias'],
-        'title': 'Model',
-        'type': 'object',
-    }
+    assert Model.model_json_schema() == {'title': 'Model', 'type': 'object', **expected}
 
 
 @pytest.mark.parametrize(
-    'input,expected',
+    'value',
     [
-        ('a', 'a'),
-        (AliasPath('a', 'b', 1), ['a', 'b', 1]),
-        (AliasChoices('a', 'b'), [['a'], ['b']]),
-        (AliasChoices('a', AliasPath('b', 1)), [['a'], ['b', 1]]),
-        (AliasChoices(), None),
+        'a',
+        AliasPath('a', 'b', 1),
+        AliasChoices('a', 'b'),
+        AliasChoices('a', AliasPath('b', 1)),
     ],
 )
-def test_validation_alias_path(input, expected):
+def test_validation_alias_path(value):
     class Model(BaseModel):
-        x: str = Field(validation_alias=input)
+        x: str = Field(validation_alias=value)
 
-    assert Model.model_fields['x'].validation_alias == expected
+    assert Model.model_fields['x'].validation_alias == value
 
 
 def test_validation_alias_invalid_value_type():
@@ -446,7 +515,7 @@ def test_validation_alias_parse_data():
     class Model(BaseModel):
         x: str = Field(validation_alias=AliasChoices('a', AliasPath('b', 1), 'c'))
 
-    assert Model.model_fields['x'].validation_alias == [['a'], ['b', 1], ['c']]
+    assert Model.model_fields['x'].validation_alias == AliasChoices('a', AliasPath('b', 1), 'c')
     assert Model.model_validate({'a': 'hello'}).x == 'hello'
     assert Model.model_validate({'b': ['hello', 'world']}).x == 'world'
     assert Model.model_validate({'c': 'test'}).x == 'test'
