@@ -1,5 +1,5 @@
-"""Logic for generating pydantic-core schemas for standard library types.
-
+"""
+Logic for generating pydantic-core schemas for standard library types.
 Import of this module is deferred since it contains imports of many standard library modules.
 """
 from __future__ import annotations as _annotations
@@ -10,6 +10,7 @@ import decimal
 import inspect
 import os
 import typing
+
 from enum import Enum
 from functools import partial
 from ipaddress import IPv4Address, IPv4Interface, IPv4Network, IPv6Address, IPv6Interface, IPv6Network
